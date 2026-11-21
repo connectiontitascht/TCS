@@ -861,18 +861,51 @@ export function VoucherSection({ userId, onAddTransaction, currentUserProfile }:
   const [endDateFilter, setEndDateFilter] = useState('');
   const [categoryFilter, setCategoryFilter] = useState('all');
 
-  // Auto-generate voucher number once vouchers list is loaded and if the title is empty
-  useEffect(() => {
-    if (!loading && !title) {
-      const today = new Date();
-      const year = today.getFullYear();
-      const month = String(today.getMonth() + 1).padStart(2, '0');
-      const day = String(today.getDate()).padStart(2, '0');
-      const count = vouchers.length;
-      const serial = String(count + 1).padStart(3, '0');
-      setTitle(`${year}${month}${day}-VOU-${serial}`);
+  // Helper to generate next unique sequential voucher number (YYYYMMDD-VOU-SERIAL)
+  const generateNextVoucherNumber = (voucherList: Voucher[], targetDateStr?: string) => {
+    const fallbackDate = new Date().toISOString().split('T')[0];
+    const cleanDate = (targetDateStr || fallbackDate).replace(/-/g, '');
+    const datePrefix = /^\d{8}$/.test(cleanDate) ? cleanDate : fallbackDate.replace(/-/g, '');
+
+    let maxSerial = 0;
+    const existingTitles = new Set<string>();
+
+    voucherList.forEach((v) => {
+      if (!v.title) return;
+      const t = v.title.trim().toUpperCase();
+      existingTitles.add(t);
+
+      // Match both YYYYMMDD-VOU-001 and legacy VOU-YYYYMMDD-001
+      const m1 = t.match(/-VOU-(\d+)$/i);
+      const m2 = t.match(/^VOU-\d+-(\d+)$/i);
+      const parsed = m1 ? parseInt(m1[1], 10) : m2 ? parseInt(m2[1], 10) : 0;
+      if (!isNaN(parsed) && parsed > maxSerial) {
+        maxSerial = parsed;
+      }
+    });
+
+    let nextSerialNum = Math.max(maxSerial + 1, voucherList.length + 1);
+    let candidate = `${datePrefix}-VOU-${String(nextSerialNum).padStart(3, '0')}`;
+    while (existingTitles.has(candidate.toUpperCase())) {
+      nextSerialNum += 1;
+      candidate = `${datePrefix}-VOU-${String(nextSerialNum).padStart(3, '0')}`;
     }
-  }, [loading, vouchers.length, title]);
+    return candidate;
+  };
+
+  // Auto-generate unique voucher number once vouchers list is loaded, if title is empty, or if it collides with an existing voucher
+  useEffect(() => {
+    if (!loading) {
+      const normalizedTitle = title.trim().toUpperCase();
+      const expectedDatePrefix = (date || new Date().toISOString().split('T')[0]).replace(/-/g, '');
+      const hasCollision = normalizedTitle ? vouchers.some(v => v.title?.trim().toUpperCase() === normalizedTitle) : false;
+      const wrongDatePrefix = normalizedTitle && /^\d{8}-VOU-\d+$/i.test(normalizedTitle) && !normalizedTitle.startsWith(`${expectedDatePrefix}-VOU-`);
+
+      if (!normalizedTitle || hasCollision || wrongDatePrefix) {
+        setTitle(generateNextVoucherNumber(vouchers, date));
+      }
+    }
+  }, [loading, vouchers, title, date]);
 
   // Load vouchers from firestore
   useEffect(() => {
@@ -1057,6 +1090,10 @@ export function VoucherSection({ userId, onAddTransaction, currentUserProfile }:
       return;
     }
 
+    const currentTitle = title.trim();
+    const isDuplicate = vouchers.some(v => v.title?.trim().toUpperCase() === currentTitle.toUpperCase());
+    const finalTitle = (!currentTitle || isDuplicate) ? generateNextVoucherNumber(vouchers, date) : currentTitle;
+
     const voucherId = `vou-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
     const docRef = doc(db, 'vouchers', voucherId);
 
@@ -1064,7 +1101,7 @@ export function VoucherSection({ userId, onAddTransaction, currentUserProfile }:
       await setDoc(docRef, {
         id: voucherId,
         userId,
-        title: title.trim(),
+        title: finalTitle,
         amount: parsedAmount,
         category,
         date,
@@ -1449,6 +1486,7 @@ export function VoucherSection({ userId, onAddTransaction, currentUserProfile }:
         <div className="flex flex-col sm:items-start">
           <button
             onClick={() => {
+              setTitle(generateNextVoucherNumber(vouchers, date));
               setIsCreateModalOpen(true);
               setSuccess('');
               setError('');
