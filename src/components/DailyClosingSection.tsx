@@ -19,7 +19,8 @@ import {
   Edit,
   FileDown,
   Filter,
-  MoreVertical
+  MoreVertical,
+  X
 } from 'lucide-react';
 import { 
   collection, 
@@ -44,11 +45,14 @@ interface DailyClosingSectionProps {
   userId: string;
   transactions: Transaction[];
   currentUserProfile?: AppUser | null;
+  modalTrigger?: { type: 'income' | 'expense' | 'cash_details'; id: number } | null;
+  onModalHandled?: () => void;
 }
 
-export function DailyClosingSection({ userId, transactions, currentUserProfile }: DailyClosingSectionProps) {
+export function DailyClosingSection({ userId, transactions, currentUserProfile, modalTrigger, onModalHandled }: DailyClosingSectionProps) {
   const [closings, setClosings] = useState<DailyClosing[]>([]);
   const [loading, setLoading] = useState(true);
+  const [activeEntryModal, setActiveEntryModal] = useState<'income' | 'expense' | 'cash_details' | null>(null);
   const [selectedDate, setSelectedDate] = useState<string>(() => {
     const today = new Date();
     return today.toISOString().split('T')[0];
@@ -116,6 +120,14 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile }
   const [endDate, setEndDate] = useState<string>('');
   const [sortOrder, setSortOrder] = useState<'newest' | 'oldest'>('newest');
 
+  useEffect(() => {
+    if (modalTrigger) {
+      setActiveEntryModal(modalTrigger.type);
+      setError('');
+      onModalHandled?.();
+    }
+  }, [modalTrigger]);
+
   // 1. Fetch closing history for list view
   useEffect(() => {
     const q = query(
@@ -138,34 +150,120 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile }
     return () => unsubscribe();
   }, [userId]);
 
-  // 2. Automated previous-day closing balance retrieval & current closed data loading
+  // Isolate Daily Closing exclusively to entries created inside Daily Closing (never collect from other menus)
+  const dailyClosingOnlyTransactions = React.useMemo(
+    () =>
+      (transactions || []).filter(
+        (t) =>
+          t.isDailyClosing === true ||
+          (t.notes &&
+            (t.notes.includes('Daily Closing entry statement:') ||
+              t.notes.includes('Daily Closing expense statement:')))
+      ),
+    [transactions]
+  );
+
+  // Helper: compute automatic opening balances for any target date (YYYY-MM-DD)
+  // Uses the latest closed DailyClosing strictly before targetDate as an anchor (if any),
+  // then adds net Daily Closing transactions (income - expense) for all dates strictly between anchorDate and targetDate.
+  const computeOpeningBalancesForDate = (targetDate: string) => {
+    const balances = {
+      cash: 0,
+      bkash: 0,
+      nagad: 0,
+      rocket: 0,
+      bank: 0,
+      sslcommerz: 0,
+    };
+
+    if (!targetDate) return balances;
+
+    const priorClosedClosings = closings
+      .filter((c) => c.date < targetDate && c.status === 'closed')
+      .sort((a, b) => b.date.localeCompare(a.date));
+
+    let anchorDate = '';
+    if (priorClosedClosings.length > 0) {
+      const lastClosed = priorClosedClosings[0];
+      anchorDate = lastClosed.date;
+      balances.cash = Number(lastClosed.closingCash ?? 0);
+      balances.bkash = Number(lastClosed.closingBkash ?? 0);
+      balances.nagad = Number(lastClosed.closingNagad ?? 0);
+      balances.rocket = Number(lastClosed.closingRocket ?? 0);
+      balances.bank = Number(lastClosed.closingBank ?? 0);
+      balances.sslcommerz = Number(lastClosed.closingSsl ?? 0);
+    }
+
+    for (const t of dailyClosingOnlyTransactions) {
+      if (!t.date || t.date >= targetDate) continue;
+      if (anchorDate && t.date <= anchorDate) continue;
+
+      const pm = (t.paymentMethod || 'cash').trim().toLowerCase();
+      const amount = Number(t.amount) || 0;
+      const delta = t.type === 'income' ? amount : -amount;
+
+      if (pm === 'cash' || !t.paymentMethod) {
+        balances.cash += delta;
+      } else if (pm === 'bkash') {
+        balances.bkash += delta;
+      } else if (pm === 'nagad') {
+        balances.nagad += delta;
+      } else if (pm === 'rocket') {
+        balances.rocket += delta;
+      } else if (pm === 'bank') {
+        balances.bank += delta;
+      } else if (pm === 'sslcommerz') {
+        balances.sslcommerz += delta;
+      }
+    }
+
+    return balances;
+  };
+
+  // 2A. Sync Opening Balances automatically for selectedDate
   useEffect(() => {
-    const fetchClosingAndPrep = async () => {
+    const existingClosedToday = closings.find(
+      (c) => c.date === selectedDate && c.status === 'closed'
+    );
+
+    if (existingClosedToday) {
+      setOpeningCash((existingClosedToday.openingCash ?? 0).toString());
+      setOpeningBkash((existingClosedToday.openingBkash ?? 0).toString());
+      setOpeningNagad((existingClosedToday.openingNagad ?? 0).toString());
+      setOpeningRocket((existingClosedToday.openingRocket ?? 0).toString());
+      setOpeningBank((existingClosedToday.openingBank ?? 0).toString());
+      setOpeningSsl((existingClosedToday.openingSsl ?? 0).toString());
+      return;
+    }
+
+    const autoOpening = computeOpeningBalancesForDate(selectedDate);
+    setOpeningCash(autoOpening.cash.toString());
+    setOpeningBkash(autoOpening.bkash.toString());
+    setOpeningNagad(autoOpening.nagad.toString());
+    setOpeningRocket(autoOpening.rocket.toString());
+    setOpeningBank(autoOpening.bank.toString());
+    setOpeningSsl(autoOpening.sslcommerz.toString());
+  }, [selectedDate, closings, dailyClosingOnlyTransactions]);
+
+  // 2B. Load saved Cash Drawer inputs when selectedDate changes
+  useEffect(() => {
+    if (loading) return;
+    const fetchDrawerForDate = async () => {
       try {
         setError('');
-        
-        // 1. Check if selected date already has a closing record (shared across company)
-        const existingToday = closings.find(c => c.date === selectedDate);
+        const existingToday = closings.find((c) => c.date === selectedDate);
         const todayDocId = existingToday ? existingToday.id : `dc_${userId}_${selectedDate}`;
         const todayDocRef = doc(db, 'daily_closings', todayDocId);
         const todayDocSnap = await getDocFromServer(todayDocRef);
-        
+
         if (todayDocSnap.exists()) {
           const todayData = todayDocSnap.data() as DailyClosing;
-          // Load saved inputs only if date changed!
           if (lastDateRef.current !== selectedDate) {
-            setOpeningCash((todayData.openingCash ?? 0).toString());
-            setOpeningBkash((todayData.openingBkash ?? 0).toString());
-            setOpeningNagad((todayData.openingNagad ?? 0).toString());
-            setOpeningRocket((todayData.openingRocket ?? 0).toString());
-            setOpeningBank((todayData.openingBank ?? 0).toString());
-            setOpeningSsl((todayData.openingSsl ?? 0).toString());
-            
             setKhaOfficeCash((todayData.khaOfficeCash ?? 0).toString());
             setDhakaOfficeCash((todayData.dhakaOfficeCash ?? 0).toString());
             setNayanCash((todayData.nayanCash ?? 0).toString());
             setAccountCash((todayData.accountCash ?? 0).toString());
-            
+
             setTransferKhaToNayan((todayData.transferKhaToNayan ?? 0).toString());
             setTransferNayanToDhaka((todayData.transferNayanToDhaka ?? 0).toString());
             setTransferDhakaToNayan((todayData.transferDhakaToNayan ?? 0).toString());
@@ -173,51 +271,15 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile }
             setIsDrawerSubmitted(!!todayData.isDrawerSubmitted);
           }
           lastDateRef.current = selectedDate;
-          if (todayData.status === 'closed') {
-            return; // Done
-          }
+          return;
         }
 
-        // 2. If open, retrieve previous day's closing
-        const currentDate = new Date(selectedDate);
-        if (isNaN(currentDate.getTime())) return;
-        
-        currentDate.setDate(currentDate.getDate() - 1);
-        const prevDateString = currentDate.toISOString().split('T')[0];
-
-        const existingPrev = closings.find(c => c.date === prevDateString);
-        const prevDocId = existingPrev ? existingPrev.id : `dc_${userId}_${prevDateString}`;
-        const prevDocRef = doc(db, 'daily_closings', prevDocId);
-        const prevDocSnap = await getDoc(prevDocRef);
-
-        if (prevDocSnap.exists()) {
-          const prevData = prevDocSnap.data() as DailyClosing;
-          // Pre-populate today's opening balance with yesterday's closing balance
-          setOpeningCash((prevData.closingCash ?? 0).toString());
-          setOpeningBkash((prevData.closingBkash ?? 0).toString());
-          setOpeningNagad((prevData.closingNagad ?? 0).toString());
-          setOpeningRocket((prevData.closingRocket ?? 0).toString());
-          setOpeningBank((prevData.closingBank ?? 0).toString());
-          setOpeningSsl((prevData.closingSsl ?? 0).toString());
-          setSuccess(`Opening balance has been loaded from the previous day's (${prevDateString}) closing balance.`);
-          setTimeout(() => setSuccess(''), 5000);
-        } else {
-          // Reset if no closing found
-          setOpeningCash('0');
-          setOpeningBkash('0');
-          setOpeningNagad('0');
-          setOpeningRocket('0');
-          setOpeningBank('0');
-          setOpeningSsl('0');
-        }
-
-        // Only reset Cash Drawer inputs if the selected date has changed!
         if (lastDateRef.current !== selectedDate) {
           setKhaOfficeCash('0');
           setDhakaOfficeCash('0');
           setNayanCash('0');
           setAccountCash('0');
-          
+
           setTransferKhaToNayan('0');
           setTransferNayanToDhaka('0');
           setTransferDhakaToNayan('0');
@@ -230,11 +292,11 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile }
       }
     };
 
-    fetchClosingAndPrep();
-  }, [selectedDate, userId, closings]);
+    fetchDrawerForDate();
+  }, [selectedDate, userId, closings, loading]);
 
-  // 3. Process current date transactions (dynamic aggregates)
-  const dateTransactions = transactions.filter(t => t.date === selectedDate);
+  // 3. Process current date Daily Closing transactions ONLY (dynamic aggregates)
+  const dateTransactions = dailyClosingOnlyTransactions.filter(t => t.date === selectedDate);
   
   // Aggregate functions by payment method
   const getAggregates = (method: string) => {
@@ -300,30 +362,35 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile }
   const entryClosingBalance = entryPreviousBalance + (parseFloat(entryAmount) || 0);
 
   const getPrevBalanceForTx = (tx: Transaction): number => {
-    const method = (tx.paymentMethod || 'cash').toLowerCase();
-    
+    const method = (tx.paymentMethod || 'cash').trim().toLowerCase() || 'cash';
+
     if (tx.date === selectedDate) {
       return getPreviousBalanceForMethod(method);
     }
 
-    const priorClosings = closings
-      .filter(c => c.date < tx.date)
-      .sort((a, b) => b.date.localeCompare(a.date));
-
-    if (priorClosings.length > 0) {
-      const lastClosing = priorClosings[0];
+    const closedOnTxDate = closings.find((c) => c.date === tx.date && c.status === 'closed');
+    if (closedOnTxDate) {
       switch (method) {
-        case 'cash': return lastClosing.closingCash;
-        case 'bkash': return lastClosing.closingBkash;
-        case 'nagad': return lastClosing.closingNagad;
-        case 'rocket': return lastClosing.closingRocket;
-        case 'bank': return lastClosing.closingBank;
-        case 'sslcommerz': return lastClosing.closingSsl;
+        case 'cash': return Number(closedOnTxDate.openingCash ?? 0);
+        case 'bkash': return Number(closedOnTxDate.openingBkash ?? 0);
+        case 'nagad': return Number(closedOnTxDate.openingNagad ?? 0);
+        case 'rocket': return Number(closedOnTxDate.openingRocket ?? 0);
+        case 'bank': return Number(closedOnTxDate.openingBank ?? 0);
+        case 'sslcommerz': return Number(closedOnTxDate.openingSsl ?? 0);
         default: return 0;
       }
     }
 
-    return 0;
+    const openingForTxDate = computeOpeningBalancesForDate(tx.date);
+    switch (method) {
+      case 'cash': return openingForTxDate.cash;
+      case 'bkash': return openingForTxDate.bkash;
+      case 'nagad': return openingForTxDate.nagad;
+      case 'rocket': return openingForTxDate.rocket;
+      case 'bank': return openingForTxDate.bank;
+      case 'sslcommerz': return openingForTxDate.sslcommerz;
+      default: return 0;
+    }
   };
 
   const getCategoryLabel = (tx: Transaction) => {
@@ -340,8 +407,7 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile }
     }
   };
 
-  const filteredDailyClosingTxs = (transactions || [])
-    .filter(t => t.isDailyClosing === true)
+  const filteredDailyClosingTxs = dailyClosingOnlyTransactions
     .filter(t => {
       // 1. Search filter
       const categoryLabel = getCategoryLabel(t).toLowerCase();
@@ -467,10 +533,10 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile }
 
     const totalIncome = dailyClosingTxs
       .filter((t) => t.type === 'income')
-      .reduce((sum, t) => sum + t.amount, 0);
+      .reduce((sum, t) => sum + (t.amount ?? 0), 0);
     const totalExpense = dailyClosingTxs
       .filter((t) => t.type === 'expense')
-      .reduce((sum, t) => sum + t.amount, 0);
+      .reduce((sum, t) => sum + (t.amount ?? 0), 0);
     const netBalance = totalIncome - totalExpense;
 
     const htmlContent = `
@@ -565,8 +631,9 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile }
                       <td colspan="7" class="py-8 text-center text-slate-400 font-bold">No daily closing transactions found for the selected criteria.</td>
                     </tr>
                   ` : dailyClosingTxs.map((tx, idx) => {
-                    const prevBal = getPrevBalanceForTx(tx);
-                    const closingBal = tx.type === 'income' ? prevBal + tx.amount : prevBal - tx.amount;
+                    const prevBal = getPrevBalanceForTx(tx) ?? 0;
+                    const amt = tx.amount ?? 0;
+                    const closingBal = tx.type === 'income' ? prevBal + amt : prevBal - amt;
                     const catLabel = getCategoryLabel(tx);
                     const isInc = tx.type === 'income';
 
@@ -581,7 +648,7 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile }
                           </span>
                         </td>
                         <td class="py-2.5 px-3 text-right font-bold font-mono whitespace-nowrap ${isInc ? 'text-emerald-600' : 'text-rose-600'}">
-                          ${isInc ? '+' : '-'} ৳ ${tx.amount.toLocaleString()}
+                          ${isInc ? '+' : '-'} ৳ ${amt.toLocaleString()}
                         </td>
                         <td class="py-2.5 px-3 text-right font-mono text-slate-500">৳ ${prevBal.toLocaleString()}</td>
                         <td class="py-2.5 px-3 text-right font-extrabold font-mono text-indigo-900">৳ ${closingBal.toLocaleString()}</td>
@@ -640,10 +707,10 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile }
 
     const totalIncome = dailyClosingTxs
       .filter((t) => t.type === 'income')
-      .reduce((sum, t) => sum + t.amount, 0);
+      .reduce((sum, t) => sum + (t.amount ?? 0), 0);
     const totalExpense = dailyClosingTxs
       .filter((t) => t.type === 'expense')
-      .reduce((sum, t) => sum + t.amount, 0);
+      .reduce((sum, t) => sum + (t.amount ?? 0), 0);
     const netBalance = totalIncome - totalExpense;
 
     const methodFlows: { [key: string]: { income: number; expense: number } } = {};
@@ -653,9 +720,9 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile }
         methodFlows[pm] = { income: 0, expense: 0 };
       }
       if (t.type === 'income') {
-        methodFlows[pm].income += t.amount;
+        methodFlows[pm].income += (t.amount ?? 0);
       } else {
-        methodFlows[pm].expense += t.amount;
+        methodFlows[pm].expense += (t.amount ?? 0);
       }
     });
 
@@ -783,7 +850,7 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile }
                         </span>
                       </td>
                       <td class="py-2.5 px-3 text-right font-bold font-mono ${isInc ? 'text-emerald-600' : 'text-rose-600'}">
-                        BDT ${tx.amount.toLocaleString()}
+                        BDT ${(tx.amount ?? 0).toLocaleString()}
                       </td>
                     </tr>
                   `;
@@ -867,8 +934,9 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile }
 
     try {
       await setDoc(txDocRef, newTx);
-      setSuccess('Entry statement added successfully!');
+      setSuccess('Income statement entry added successfully!');
       setEntryAmount('');
+      setActiveEntryModal(null);
       setTimeout(() => setSuccess(''), 5500);
     } catch (err) {
       handleFirestoreError(err, OperationType.WRITE, `transactions/${newTxId}`);
@@ -932,6 +1000,7 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile }
       await setDoc(txDocRef, newTx);
       setSuccess('Expense statement entry added successfully!');
       setExpenseAmount('');
+      setActiveEntryModal(null);
       setTimeout(() => setSuccess(''), 5500);
     } catch (err) {
       handleFirestoreError(err, OperationType.WRITE, `transactions/${newTxId}`);
@@ -1111,7 +1180,8 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile }
       }
 
       await setDoc(docRef, payload, { merge: true });
-      setSuccess('Cash Drawer Statement successfully submitted and saved! See the formal statement layout below.');
+      setSuccess('Cash Details statement successfully submitted and saved!');
+      setActiveEntryModal(null);
       setTimeout(() => setSuccess(''), 5500);
     } catch (err) {
       console.error('Error saving drawer statement:', err);
@@ -1237,12 +1307,12 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile }
   // Print the currently active selected date closing
   const handlePrintCurrent = () => {
     const existing = closings.find(c => c.date === selectedDate);
-    if (existing) {
+    if (existing && existing.status === 'closed') {
       setPrintPreviewData(existing);
     } else {
       const activeObj: DailyClosing = {
-        id: `dc_${userId}_${selectedDate}`,
-        userId,
+        id: existing ? existing.id : `dc_${userId}_${selectedDate}`,
+        userId: existing?.userId || userId,
         date: selectedDate,
         openingCash: val(openingCash),
         openingBkash: val(openingBkash),
@@ -1282,9 +1352,9 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile }
         transferDhakaToNayan: val(transferDhakaToNayan),
         transferDhakaToKha: val(transferDhakaToKha),
 
-        notes: notes.trim(),
-        status: 'open',
-        closedBy: 'System Admin',
+        notes: notes.trim() || existing?.notes || '',
+        status: existing?.status || 'open',
+        closedBy: existing?.closedBy || currentUserProfile?.email || 'System Admin',
       };
       setPrintPreviewData(activeObj);
     }
@@ -1327,12 +1397,12 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile }
       doc.line(14, 49, 196, 49);
 
       const tableRows = [
-        ['Cash', `${dc.openingCash.toLocaleString()} BDT`, `+${dc.totalCashIn.toLocaleString()} BDT`, `-${dc.totalCashOut.toLocaleString()} BDT`, `${dc.closingCash.toLocaleString()} BDT`],
-        ['bKash', `${dc.openingBkash.toLocaleString()} BDT`, `+${dc.totalBkashIn.toLocaleString()} BDT`, `-${dc.totalBkashOut.toLocaleString()} BDT`, `${dc.closingBkash.toLocaleString()} BDT`],
-        ['Nagad', `${dc.openingNagad.toLocaleString()} BDT`, `+${dc.totalNagadIn.toLocaleString()} BDT`, `-${dc.totalNagadOut.toLocaleString()} BDT`, `${dc.closingNagad.toLocaleString()} BDT`],
-        ['Rocket', `${dc.openingRocket.toLocaleString()} BDT`, `+${dc.totalRocketIn.toLocaleString()} BDT`, `-${dc.totalRocketOut.toLocaleString()} BDT`, `${dc.closingRocket.toLocaleString()} BDT`],
-        ['Bank Transfer', `${dc.openingBank.toLocaleString()} BDT`, `+${dc.totalBankIn.toLocaleString()} BDT`, `-${dc.totalBankOut.toLocaleString()} BDT`, `${dc.closingBank.toLocaleString()} BDT`],
-        ['SSL Commerz', `${dc.openingSsl.toLocaleString()} BDT`, `+${dc.totalSslIn.toLocaleString()} BDT`, `-${dc.totalSslOut.toLocaleString()} BDT`, `${dc.closingSsl.toLocaleString()} BDT`],
+        ['Cash', `${(dc.openingCash ?? 0).toLocaleString()} BDT`, `+${(dc.totalCashIn ?? 0).toLocaleString()} BDT`, `-${(dc.totalCashOut ?? 0).toLocaleString()} BDT`, `${(dc.closingCash ?? 0).toLocaleString()} BDT`],
+        ['bKash', `${(dc.openingBkash ?? 0).toLocaleString()} BDT`, `+${(dc.totalBkashIn ?? 0).toLocaleString()} BDT`, `-${(dc.totalBkashOut ?? 0).toLocaleString()} BDT`, `${(dc.closingBkash ?? 0).toLocaleString()} BDT`],
+        ['Nagad', `${(dc.openingNagad ?? 0).toLocaleString()} BDT`, `+${(dc.totalNagadIn ?? 0).toLocaleString()} BDT`, `-${(dc.totalNagadOut ?? 0).toLocaleString()} BDT`, `${(dc.closingNagad ?? 0).toLocaleString()} BDT`],
+        ['Rocket', `${(dc.openingRocket ?? 0).toLocaleString()} BDT`, `+${(dc.totalRocketIn ?? 0).toLocaleString()} BDT`, `-${(dc.totalRocketOut ?? 0).toLocaleString()} BDT`, `${(dc.closingRocket ?? 0).toLocaleString()} BDT`],
+        ['Bank Transfer', `${(dc.openingBank ?? 0).toLocaleString()} BDT`, `+${(dc.totalBankIn ?? 0).toLocaleString()} BDT`, `-${(dc.totalBankOut ?? 0).toLocaleString()} BDT`, `${(dc.closingBank ?? 0).toLocaleString()} BDT`],
+        ['SSL Commerz', `${(dc.openingSsl ?? 0).toLocaleString()} BDT`, `+${(dc.totalSslIn ?? 0).toLocaleString()} BDT`, `-${(dc.totalSslOut ?? 0).toLocaleString()} BDT`, `${(dc.closingSsl ?? 0).toLocaleString()} BDT`],
       ];
 
       doc.setFont('helvetica', 'bold');
@@ -1417,7 +1487,7 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile }
       nextStartY = (doc as any).lastAutoTable.finalY + 12;
 
       // Filter and render Daily Closing Entry & Expense Logs
-      const previewTxs = (transactions || []).filter(t => t.isDailyClosing === true && t.date === dc.date);
+      const previewTxs = dailyClosingOnlyTransactions.filter(t => t.date === dc.date);
       if (previewTxs.length > 0) {
         if (nextStartY + 35 > 280) {
           doc.addPage();
@@ -1433,7 +1503,7 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile }
           getCategoryLabel(t),
           t.paymentMethod || 'cash',
           t.type === 'income' ? 'INFLOW (+)' : 'OUTFLOW (-)',
-          `${t.amount.toLocaleString()} BDT`
+          `${(t.amount ?? 0).toLocaleString()} BDT`
         ]);
 
         autoTable(doc, {
@@ -1476,10 +1546,10 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile }
       }
 
       // Financial Summary Box
-      const totalIn = dc.totalCashIn + dc.totalBkashIn + dc.totalNagadIn + dc.totalRocketIn + dc.totalBankIn + dc.totalSslIn;
-      const totalOut = dc.totalCashOut + dc.totalBkashOut + dc.totalNagadOut + dc.totalRocketOut + dc.totalBankOut + dc.totalSslOut;
-      const totalOpenBal = dc.openingCash + dc.openingBkash + dc.openingNagad + dc.openingRocket + dc.openingBank + dc.openingSsl;
-      const totalCloseBal = dc.closingCash + dc.closingBkash + dc.closingNagad + dc.closingRocket + dc.closingBank + dc.closingSsl;
+      const totalIn = (dc.totalCashIn ?? 0) + (dc.totalBkashIn ?? 0) + (dc.totalNagadIn ?? 0) + (dc.totalRocketIn ?? 0) + (dc.totalBankIn ?? 0) + (dc.totalSslIn ?? 0);
+      const totalOut = (dc.totalCashOut ?? 0) + (dc.totalBkashOut ?? 0) + (dc.totalNagadOut ?? 0) + (dc.totalRocketOut ?? 0) + (dc.totalBankOut ?? 0) + (dc.totalSslOut ?? 0);
+      const totalOpenBal = (dc.openingCash ?? 0) + (dc.openingBkash ?? 0) + (dc.openingNagad ?? 0) + (dc.openingRocket ?? 0) + (dc.openingBank ?? 0) + (dc.openingSsl ?? 0);
+      const totalCloseBal = (dc.closingCash ?? 0) + (dc.closingBkash ?? 0) + (dc.closingNagad ?? 0) + (dc.closingRocket ?? 0) + (dc.closingBank ?? 0) + (dc.closingSsl ?? 0);
 
       if (nextStartY + 36 > 280) {
         doc.addPage();
@@ -1564,10 +1634,10 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile }
   const renderPrintPreviewModal = () => {
     if (!printPreviewData) return null;
 
-    const totalIn = printPreviewData.totalCashIn + printPreviewData.totalBkashIn + printPreviewData.totalNagadIn + printPreviewData.totalRocketIn + printPreviewData.totalBankIn + printPreviewData.totalSslIn;
-    const totalOut = printPreviewData.totalCashOut + printPreviewData.totalBkashOut + printPreviewData.totalNagadOut + printPreviewData.totalRocketOut + printPreviewData.totalBankOut + printPreviewData.totalSslOut;
-    const totalOpenBal = printPreviewData.openingCash + printPreviewData.openingBkash + printPreviewData.openingNagad + printPreviewData.openingRocket + printPreviewData.openingBank + printPreviewData.openingSsl;
-    const totalCloseBal = printPreviewData.closingCash + printPreviewData.closingBkash + printPreviewData.closingNagad + printPreviewData.closingRocket + printPreviewData.closingBank + printPreviewData.closingSsl;
+    const totalIn = (printPreviewData.totalCashIn ?? 0) + (printPreviewData.totalBkashIn ?? 0) + (printPreviewData.totalNagadIn ?? 0) + (printPreviewData.totalRocketIn ?? 0) + (printPreviewData.totalBankIn ?? 0) + (printPreviewData.totalSslIn ?? 0);
+    const totalOut = (printPreviewData.totalCashOut ?? 0) + (printPreviewData.totalBkashOut ?? 0) + (printPreviewData.totalNagadOut ?? 0) + (printPreviewData.totalRocketOut ?? 0) + (printPreviewData.totalBankOut ?? 0) + (printPreviewData.totalSslOut ?? 0);
+    const totalOpenBal = (printPreviewData.openingCash ?? 0) + (printPreviewData.openingBkash ?? 0) + (printPreviewData.openingNagad ?? 0) + (printPreviewData.openingRocket ?? 0) + (printPreviewData.openingBank ?? 0) + (printPreviewData.openingSsl ?? 0);
+    const totalCloseBal = (printPreviewData.closingCash ?? 0) + (printPreviewData.closingBkash ?? 0) + (printPreviewData.closingNagad ?? 0) + (printPreviewData.closingRocket ?? 0) + (printPreviewData.closingBank ?? 0) + (printPreviewData.closingSsl ?? 0);
 
     return (
       <div className="fixed inset-0 bg-slate-950/70 z-[120] flex items-center justify-center p-4 overflow-y-auto animate-fade-in no-print">
@@ -1657,45 +1727,45 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile }
                   <tbody>
                     <tr className="border-b border-slate-100">
                       <td className="py-1.5 font-semibold text-slate-700">Cash</td>
-                      <td className="py-1.5 text-right font-mono">{printPreviewData.openingCash.toLocaleString()}</td>
-                      <td className="py-1.5 text-right font-mono text-emerald-600">+{printPreviewData.totalCashIn.toLocaleString()}</td>
-                      <td className="py-1.5 text-right font-mono text-rose-600">-{printPreviewData.totalCashOut.toLocaleString()}</td>
-                      <td className="py-1.5 text-right font-mono font-bold text-slate-900">{printPreviewData.closingCash.toLocaleString()}</td>
+                      <td className="py-1.5 text-right font-mono">{(printPreviewData.openingCash ?? 0).toLocaleString()}</td>
+                      <td className="py-1.5 text-right font-mono text-emerald-600">+{(printPreviewData.totalCashIn ?? 0).toLocaleString()}</td>
+                      <td className="py-1.5 text-right font-mono text-rose-600">-{(printPreviewData.totalCashOut ?? 0).toLocaleString()}</td>
+                      <td className="py-1.5 text-right font-mono font-bold text-slate-900">{(printPreviewData.closingCash ?? 0).toLocaleString()}</td>
                     </tr>
                     <tr className="border-b border-slate-100">
                       <td className="py-1.5 font-semibold text-slate-700">bKash</td>
-                      <td className="py-1.5 text-right font-mono">{printPreviewData.openingBkash.toLocaleString()}</td>
-                      <td className="py-1.5 text-right font-mono text-emerald-600">+{printPreviewData.totalBkashIn.toLocaleString()}</td>
-                      <td className="py-1.5 text-right font-mono text-rose-600">-{printPreviewData.totalBkashOut.toLocaleString()}</td>
-                      <td className="py-1.5 text-right font-mono font-bold text-slate-900">{printPreviewData.closingBkash.toLocaleString()}</td>
+                      <td className="py-1.5 text-right font-mono">{(printPreviewData.openingBkash ?? 0).toLocaleString()}</td>
+                      <td className="py-1.5 text-right font-mono text-emerald-600">+{(printPreviewData.totalBkashIn ?? 0).toLocaleString()}</td>
+                      <td className="py-1.5 text-right font-mono text-rose-600">-{(printPreviewData.totalBkashOut ?? 0).toLocaleString()}</td>
+                      <td className="py-1.5 text-right font-mono font-bold text-slate-900">{(printPreviewData.closingBkash ?? 0).toLocaleString()}</td>
                     </tr>
                     <tr className="border-b border-slate-100">
                       <td className="py-1.5 font-semibold text-slate-700">Nagad</td>
-                      <td className="py-1.5 text-right font-mono">{printPreviewData.openingNagad.toLocaleString()}</td>
-                      <td className="py-1.5 text-right font-mono text-emerald-600">+{printPreviewData.totalNagadIn.toLocaleString()}</td>
-                      <td className="py-1.5 text-right font-mono text-rose-600">-{printPreviewData.totalNagadOut.toLocaleString()}</td>
-                      <td className="py-1.5 text-right font-mono font-bold text-slate-900">{printPreviewData.closingNagad.toLocaleString()}</td>
+                      <td className="py-1.5 text-right font-mono">{(printPreviewData.openingNagad ?? 0).toLocaleString()}</td>
+                      <td className="py-1.5 text-right font-mono text-emerald-600">+{(printPreviewData.totalNagadIn ?? 0).toLocaleString()}</td>
+                      <td className="py-1.5 text-right font-mono text-rose-600">-{(printPreviewData.totalNagadOut ?? 0).toLocaleString()}</td>
+                      <td className="py-1.5 text-right font-mono font-bold text-slate-900">{(printPreviewData.closingNagad ?? 0).toLocaleString()}</td>
                     </tr>
                     <tr className="border-b border-slate-100">
                       <td className="py-1.5 font-semibold text-slate-700">Rocket</td>
-                      <td className="py-1.5 text-right font-mono">{printPreviewData.openingRocket.toLocaleString()}</td>
-                      <td className="py-1.5 text-right font-mono text-emerald-600">+{printPreviewData.totalRocketIn.toLocaleString()}</td>
-                      <td className="py-1.5 text-right font-mono text-rose-600">-{printPreviewData.totalRocketOut.toLocaleString()}</td>
-                      <td className="py-1.5 text-right font-mono font-bold text-slate-900">{printPreviewData.closingRocket.toLocaleString()}</td>
+                      <td className="py-1.5 text-right font-mono">{(printPreviewData.openingRocket ?? 0).toLocaleString()}</td>
+                      <td className="py-1.5 text-right font-mono text-emerald-600">+{(printPreviewData.totalRocketIn ?? 0).toLocaleString()}</td>
+                      <td className="py-1.5 text-right font-mono text-rose-600">-{(printPreviewData.totalRocketOut ?? 0).toLocaleString()}</td>
+                      <td className="py-1.5 text-right font-mono font-bold text-slate-900">{(printPreviewData.closingRocket ?? 0).toLocaleString()}</td>
                     </tr>
                     <tr className="border-b border-slate-100">
                       <td className="py-1.5 font-semibold text-slate-700">Bank</td>
-                      <td className="py-1.5 text-right font-mono">{printPreviewData.openingBank.toLocaleString()}</td>
-                      <td className="py-1.5 text-right font-mono text-emerald-600">+{printPreviewData.totalBankIn.toLocaleString()}</td>
-                      <td className="py-1.5 text-right font-mono text-rose-600">-{printPreviewData.totalBankOut.toLocaleString()}</td>
-                      <td className="py-1.5 text-right font-mono font-bold text-slate-900">{printPreviewData.closingBank.toLocaleString()}</td>
+                      <td className="py-1.5 text-right font-mono">{(printPreviewData.openingBank ?? 0).toLocaleString()}</td>
+                      <td className="py-1.5 text-right font-mono text-emerald-600">+{(printPreviewData.totalBankIn ?? 0).toLocaleString()}</td>
+                      <td className="py-1.5 text-right font-mono text-rose-600">-{(printPreviewData.totalBankOut ?? 0).toLocaleString()}</td>
+                      <td className="py-1.5 text-right font-mono font-bold text-slate-900">{(printPreviewData.closingBank ?? 0).toLocaleString()}</td>
                     </tr>
                     <tr className="border-b border-slate-100">
                       <td className="py-1.5 font-semibold text-slate-700">SSL</td>
-                      <td className="py-1.5 text-right font-mono">{printPreviewData.openingSsl.toLocaleString()}</td>
-                      <td className="py-1.5 text-right font-mono text-emerald-600">+{printPreviewData.totalSslIn.toLocaleString()}</td>
-                      <td className="py-1.5 text-right font-mono text-rose-600">-{printPreviewData.totalSslOut.toLocaleString()}</td>
-                      <td className="py-1.5 text-right font-mono font-bold text-slate-900">{printPreviewData.closingSsl.toLocaleString()}</td>
+                      <td className="py-1.5 text-right font-mono">{(printPreviewData.openingSsl ?? 0).toLocaleString()}</td>
+                      <td className="py-1.5 text-right font-mono text-emerald-600">+{(printPreviewData.totalSslIn ?? 0).toLocaleString()}</td>
+                      <td className="py-1.5 text-right font-mono text-rose-600">-{(printPreviewData.totalSslOut ?? 0).toLocaleString()}</td>
+                      <td className="py-1.5 text-right font-mono font-bold text-slate-900">{(printPreviewData.closingSsl ?? 0).toLocaleString()}</td>
                     </tr>
                   </tbody>
                 </table>
@@ -1783,7 +1853,7 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile }
               </div>
               <div className="border-t border-b border-slate-200 py-1 mb-5 overflow-x-auto">
                 {(() => {
-                  const previewTxs = (transactions || []).filter(t => t.isDailyClosing === true && t.date === printPreviewData.date);
+                  const previewTxs = dailyClosingOnlyTransactions.filter(t => t.date === printPreviewData.date);
                   if (previewTxs.length === 0) {
                     return (
                       <div className="py-2 text-center text-slate-400 italic text-[10px]">
@@ -1812,7 +1882,7 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile }
                                 {tx.type === 'income' ? 'INFLOW' : 'OUTFLOW'}
                               </td>
                               <td className={`py-1.5 text-right font-mono font-bold ${tx.type === 'income' ? 'text-emerald-700' : 'text-rose-700'}`}>
-                                {tx.type === 'income' ? '+' : '-'}{tx.amount.toLocaleString()} BDT
+                                {tx.type === 'income' ? '+' : '-'}{(tx.amount ?? 0).toLocaleString()} BDT
                               </td>
                             </tr>
                           );
@@ -1935,453 +2005,230 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile }
         </div>
       )}
 
+      {/* Sub-Menu Quick Navigation Bar */}
+      <div className="bg-white rounded-2xl p-2.5 border border-slate-200/60 shadow-sm flex flex-wrap items-center justify-between gap-3">
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={() => { setError(''); setActiveEntryModal('income'); }}
+            className="px-4 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-extrabold flex items-center gap-2 shadow-sm shadow-emerald-600/20 transition cursor-pointer"
+          >
+            <TrendingUp className="w-4 h-4" />
+            <span>Income</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => { setError(''); setActiveEntryModal('expense'); }}
+            className="px-4 py-2.5 bg-rose-600 hover:bg-rose-700 text-white rounded-xl text-xs font-extrabold flex items-center gap-2 shadow-sm shadow-rose-600/20 transition cursor-pointer"
+          >
+            <TrendingDown className="w-4 h-4" />
+            <span>Expense</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => { setError(''); setActiveEntryModal('cash_details'); }}
+            className="px-4 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-extrabold flex items-center gap-2 shadow-sm shadow-indigo-600/20 transition cursor-pointer"
+          >
+            <Coins className="w-4 h-4" />
+            <span>Cash Details</span>
+          </button>
+        </div>
+
+        <div className="flex items-center gap-2 pr-1">
+          {isDateAlreadyClosed ? (
+            <span className="inline-flex items-center gap-1.5 text-[11px] bg-rose-50 text-rose-600 px-3 py-1.5 rounded-xl font-bold border border-rose-100">
+              <Lock className="w-3.5 h-3.5" /> {selectedDate} Locked
+            </span>
+          ) : (
+            <span className="inline-flex items-center gap-1.5 text-[11px] bg-emerald-50 text-emerald-700 px-3 py-1.5 rounded-xl font-bold border border-emerald-100">
+              <Unlock className="w-3.5 h-3.5" /> {selectedDate} Open
+            </span>
+          )}
+        </div>
+      </div>
+
       {/* Main calculation workspace */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
         
-        {/* Left Side 2-Columns: Daily Income Statement Entry Card */}
-        <div className="lg:col-span-2 space-y-8">
-          {/* Daily Income Statement Entry Card */}
-          <div className="bg-white border-2 border-[#1a1a1e] p-8 shadow-[6px_6px_0_rgba(26,26,30,0.08)]">
-            <div className="flex items-center justify-between border-b border-[#1a1a1e] pb-6 mb-8">
-              <div className="flex items-center gap-4">
-                <span className="p-3 bg-[#1a1a1e] text-white">
-                  <PlusCircle className="w-6 h-6" />
-                </span>
-                <div>
-                  <h3 className="font-syne text-xl font-bold uppercase tracking-tighter">Daily Income Entry</h3>
-                  <p className="font-mono text-[10px] uppercase text-[#1a1a1e]/60">Record Date: {selectedDate}</p>
-                </div>
+        {/* Left Side 2-Columns: Summary Cards, Method Breakdown & Cash Details Preview */}
+        <div className="lg:col-span-2 space-y-6">
+          {/* 3 Summary Cards (Read-only Overview) */}
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            {/* Income Summary Card */}
+            <div className="bg-white rounded-2xl p-5 border border-slate-200/60 shadow-sm flex items-start justify-between">
+              <div>
+                <span className="text-[10px] font-black uppercase tracking-wider text-emerald-600 block">Daily Income</span>
+                <h4 className="text-xl font-black font-mono text-slate-900 mt-1">+{totalInflow.toLocaleString()} ৳</h4>
+                <p className="text-[11px] text-slate-400 font-medium mt-0.5">
+                  {dateTransactions.filter(t => t.type === 'income').length} entries on {selectedDate}
+                </p>
               </div>
-              {isDateAlreadyClosed && (
-                <span className="flex items-center gap-2 text-xs bg-red-100 text-red-600 px-4 py-2 font-bold border-2 border-red-600">
-                  <Lock className="w-4 h-4" /> Locked
-                </span>
-              )}
+              <span className="p-2.5 bg-emerald-50 text-emerald-600 rounded-xl">
+                <TrendingUp className="w-5 h-5" />
+              </span>
             </div>
 
-            {/* Income Statement Entry Form */}
-            {!isDateAlreadyClosed && (
-              <form onSubmit={handleAddEntryStatement} className="grid grid-cols-1 sm:grid-cols-4 gap-6 items-end">
-                <div className="input-group">
-                  <label className="block font-mono text-[10px] uppercase text-[#1a1a1e]/60 mb-2">Category</label>
-                  <select
-                    value={entryCategory}
-                    onChange={(e) => setEntryCategory(e.target.value)}
-                    className="w-full text-sm p-3 border-2 border-[#1a1a1e] rounded-none font-mono cursor-pointer"
-                  >
-                    <option value="customer_bill">Customer Bill</option>
-                    <option value="reseller_bill">Reseller Bill</option>
-                    <option value="service_charge">Service Charge</option>
-                    <option value="other_income">Other</option>
-                  </select>
-                </div>
-                <div className="input-group">
-                  <label className="block font-mono text-[10px] uppercase text-[#1a1a1e]/60 mb-2">Method</label>
-                  <select
-                    value={entryPaymentMethod}
-                    onChange={(e) => setEntryPaymentMethod(e.target.value)}
-                    className="w-full text-sm p-3 border-2 border-[#1a1a1e] rounded-none font-mono cursor-pointer"
-                  >
-                    <option value="cash">Cash</option>
-                    <option value="bkash">bKash</option>
-                    <option value="nagad">Nagad</option>
-                    <option value="rocket">Rocket</option>
-                    <option value="bank">Bank</option>
-                    <option value="sslcommerz">SSL Commerz</option>
-                  </select>
-                </div>
-                <div className="input-group">
-                  <label className="block font-mono text-[10px] uppercase text-[#1a1a1e]/60 mb-2">Amount (BDT)</label>
-                  <input
-                    type="number"
-                    placeholder="0.00"
-                    value={entryAmount}
-                    onChange={(e) => setEntryAmount(e.target.value)}
-                    className="w-full text-sm p-3 border-2 border-[#1a1a1e] rounded-none font-mono"
-                  />
-                </div>
-                <button
-                  type="submit"
-                  className="w-full p-3 bg-[#1a1a1e] text-white font-bold text-sm uppercase tracking-wider hover:bg-[#6366f1] transition cursor-pointer"
-                >
-                  + Add Income
-                </button>
-              </form>
-            )}
+            {/* Expense Summary Card */}
+            <div className="bg-white rounded-2xl p-5 border border-slate-200/60 shadow-sm flex items-start justify-between">
+              <div>
+                <span className="text-[10px] font-black uppercase tracking-wider text-rose-600 block">Daily Expense</span>
+                <h4 className="text-xl font-black font-mono text-slate-900 mt-1">-{totalOutflow.toLocaleString()} ৳</h4>
+                <p className="text-[11px] text-slate-400 font-medium mt-0.5">
+                  {dateTransactions.filter(t => t.type === 'expense').length} entries on {selectedDate}
+                </p>
+              </div>
+              <span className="p-2.5 bg-rose-50 text-rose-600 rounded-xl">
+                <TrendingDown className="w-5 h-5" />
+              </span>
+            </div>
 
-            {/* Income Statement Records Table removed as per user request */}
+            {/* Cash Details Summary Card */}
+            <div className="bg-white rounded-2xl p-5 border border-slate-200/60 shadow-sm flex items-start justify-between">
+              <div>
+                <span className="text-[10px] font-black uppercase tracking-wider text-indigo-600 block">Cash Details</span>
+                <h4 className="text-xl font-black font-mono text-slate-900 mt-1">
+                  {(val(khaOfficeCash) + val(dhakaOfficeCash) + val(nayanCash) + val(accountCash)).toLocaleString()} ৳
+                </h4>
+                <p className="text-[11px] text-slate-400 font-medium mt-0.5">
+                  {isDateAlreadyClosed ? 'Locked & Closed' : isDrawerSubmitted ? 'Submitted Draft' : 'Pending Entry'}
+                </p>
+              </div>
+              <span className="p-2.5 bg-indigo-50 text-indigo-600 rounded-xl">
+                <Coins className="w-5 h-5" />
+              </span>
+            </div>
           </div>
 
-          {/* Daily Expense Statement Entry Card */}
-          <div className="bg-white border-2 border-[#1a1a1e] p-8 shadow-[6px_6px_0_rgba(26,26,30,0.08)]">
-            <div className="flex items-center justify-between border-b border-slate-100 pb-4 mb-5">
+          {/* Payment Method Breakdown Card */}
+          <div className="bg-white rounded-2xl p-6 border border-slate-200/60 shadow-sm">
+            <div className="flex items-center justify-between border-b border-slate-100 pb-4 mb-4">
               <div className="flex items-center gap-2.5">
-                <span className="p-2 bg-rose-50 text-rose-600 rounded-xl">
-                  <TrendingDown className="w-5 h-5" />
+                <span className="p-2 bg-teal-50 text-teal-600 rounded-xl">
+                  <Calculator className="w-4.5 h-4.5" />
                 </span>
                 <div>
-                  <h3 className="text-sm font-extrabold text-slate-800">Daily Expense Statement Entry ({selectedDate})</h3>
-                  <p className="text-[11px] text-slate-400 mt-0.5">Daily expense records table by category and payment method</p>
+                  <h3 className="text-sm font-extrabold text-slate-800">Payment Method Balance Breakdown</h3>
+                  <p className="text-[11px] text-slate-400 mt-0.5">Live opening, collection, expense & closing balance for {selectedDate}</p>
                 </div>
               </div>
-              {isDateAlreadyClosed && (
-                <span className="flex items-center gap-1 text-[10px] bg-rose-50 text-rose-600 px-2.5 py-1 rounded-full font-bold border border-rose-100">
-                  <Lock className="w-3 h-3" /> Locked
-                </span>
-              )}
             </div>
 
-            {/* Expense Statement Entry Form */}
-            {!isDateAlreadyClosed && (
-              <form onSubmit={handleAddExpenseEntryStatement} className="bg-slate-50 border border-slate-200/50 rounded-2xl p-4 mb-6 space-y-4">
-                <div className="grid grid-cols-1 sm:grid-cols-4 gap-4 items-end">
-                  <div>
-                    <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1.5">Category</label>
-                    <select
-                      value={expenseCategory}
-                      onChange={(e) => setExpenseCategory(e.target.value)}
-                      className="w-full text-xs px-3 py-2 bg-white border border-slate-200 rounded-xl text-slate-700 focus:ring-1 focus:ring-indigo-500 focus:outline-none font-bold cursor-pointer"
-                    >
-                      {Object.entries(EXPENSE_CATEGORY_LABELS).map(([key, item]) => (
-                        <option key={key} value={key}>
-                          {item.label}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                  <div>
-                    <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1.5">Payment Method</label>
-                    <select
-                      value={expensePaymentMethod}
-                      onChange={(e) => setExpensePaymentMethod(e.target.value)}
-                      className="w-full text-xs px-3 py-2 bg-white border border-slate-200 rounded-xl text-slate-700 focus:ring-1 focus:ring-indigo-500 focus:outline-none font-bold capitalize cursor-pointer"
-                    >
-                      <option value="cash">Cash</option>
-                      <option value="bkash">bKash</option>
-                      <option value="nagad">Nagad</option>
-                      <option value="rocket">Rocket</option>
-                      <option value="bank">Bank Transfer</option>
-                      <option value="sslcommerz">SSL Commerz</option>
-                    </select>
-                  </div>
-                  <div>
-                    <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1.5">Today Expense (BDT)</label>
-                    <input
-                      type="number"
-                      placeholder="Amount"
-                      value={expenseAmount}
-                      onChange={(e) => setExpenseAmount(e.target.value)}
-                      className="w-full text-xs px-3 py-2 bg-white border border-slate-200 rounded-xl text-slate-700 focus:ring-1 focus:ring-indigo-500 focus:outline-none font-semibold font-mono"
-                    />
-                  </div>
-                  <div>
-                    <button
-                      type="submit"
-                      className="w-full py-2 bg-rose-600 hover:bg-rose-700 text-white font-bold rounded-xl text-xs flex items-center justify-center gap-1.5 transition cursor-pointer"
-                    >
-                      <Plus className="w-4 h-4" /> Add Expense
-                    </button>
-                  </div>
-                </div>
-              </form>
-            )}
-
-            {/* Expense Statement Records Table removed as per user request */}
+            <div className="overflow-x-auto">
+              <table className="w-full text-left border-collapse text-xs">
+                <thead>
+                  <tr className="border-b border-slate-100 text-[10px] font-bold text-slate-400 uppercase tracking-wider">
+                    <th className="py-2.5 px-3">Payment Method</th>
+                    <th className="py-2.5 px-3 text-right">Opening</th>
+                    <th className="py-2.5 px-3 text-right">Income (+)</th>
+                    <th className="py-2.5 px-3 text-right">Expense (-)</th>
+                    <th className="py-2.5 px-3 text-right">Closing</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {[
+                    { key: 'cash', label: 'Cash', open: val(openingCash), flow: cashFlow, close: closingCash },
+                    { key: 'bkash', label: 'bKash', open: val(openingBkash), flow: bkashFlow, close: closingBkash },
+                    { key: 'nagad', label: 'Nagad', open: val(openingNagad), flow: nagadFlow, close: closingNagad },
+                    { key: 'rocket', label: 'Rocket', open: val(openingRocket), flow: rocketFlow, close: closingRocket },
+                    { key: 'bank', label: 'Bank Transfer', open: val(openingBank), flow: bankFlow, close: closingBank },
+                    { key: 'sslcommerz', label: 'SSL Commerz', open: val(openingSsl), flow: sslFlow, close: closingSsl },
+                  ].map((row) => (
+                    <tr key={row.key} className="hover:bg-slate-50/60 transition">
+                      <td className="py-2.5 px-3 font-bold text-slate-700 flex items-center gap-2.5">
+                        <PaymentMethodLogo method={row.key} className="w-6 h-6" />
+                        <span>{row.label}</span>
+                      </td>
+                      <td className="py-2.5 px-3 text-right font-mono text-slate-600">{row.open.toLocaleString()}</td>
+                      <td className="py-2.5 px-3 text-right font-mono font-bold text-emerald-600">+{row.flow.income.toLocaleString()}</td>
+                      <td className="py-2.5 px-3 text-right font-mono font-bold text-rose-600">-{row.flow.expense.toLocaleString()}</td>
+                      <td className="py-2.5 px-3 text-right font-mono font-extrabold text-slate-900">{row.close.toLocaleString()}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           </div>
 
-          {/* Cash Drawer Statement Card */}
-          {/* Cash Drawer Statement Card */}
-          {currentUserProfile?.role !== 'accountant' && (
-            <div id="cash-drawer-statement-card" className="bg-white rounded-2xl p-6 border border-slate-200/60 shadow-sm transition-all duration-300">
-              <div className="flex items-center justify-between border-b border-slate-100 pb-4 mb-5">
-                <div className="flex items-center gap-2.5">
-                  <span className="p-2 bg-indigo-50 text-indigo-600 rounded-xl">
-                    <Coins className="w-5 h-5" />
-                  </span>
-                  <div>
-                    <h3 className="text-sm font-extrabold text-slate-800">Cash Drawer Statement ({selectedDate})</h3>
-                    <p className="text-[11px] text-slate-400 mt-0.5">Summary of physical cash locations and transfers</p>
-                  </div>
-                </div>
-                <div className="flex items-center gap-2">
-                  <div className="relative">
-                    <button onClick={() => setIsMenuOpen(!isMenuOpen)} className="p-2 text-slate-400 hover:text-slate-600 rounded-lg hover:bg-slate-100 transition cursor-pointer">
-                      <MoreVertical className="w-4 h-4" />
-                    </button>
-                    {isMenuOpen && (
-                      <div className="absolute right-0 top-full mt-2 w-40 bg-white border border-slate-200 rounded-xl shadow-lg z-50 p-2">
-                        <button onClick={() => { setIsMenuOpen(false); alert('Action 1 clicked'); }} className="w-full text-left text-xs p-2 hover:bg-slate-50 rounded-lg font-semibold text-slate-700 cursor-pointer">View History</button>
-                        <button onClick={() => { setIsMenuOpen(false); alert('Action 2 clicked'); }} className="w-full text-left text-xs p-2 hover:bg-slate-50 rounded-lg font-semibold text-slate-700 cursor-pointer">Export Data</button>
-                      </div>
-                    )}
-                  </div>
-                  {isDateAlreadyClosed ? (
-                    <span className="flex items-center gap-1 text-[10px] bg-rose-50 text-rose-600 px-2.5 py-1 rounded-full font-bold border border-rose-100">
-                      <Lock className="w-3 h-3" /> Locked
-                    </span>
-                  ) : isDrawerSubmitted ? (
-                    <span className="flex items-center gap-1 text-[10px] bg-emerald-50 text-emerald-600 px-2.5 py-1 rounded-full font-bold border border-emerald-100 animate-pulse">
-                      <CheckCircle className="w-3 h-3" /> Submitted
-                    </span>
-                  ) : (
-                    <span className="flex items-center gap-1 text-[10px] bg-indigo-50 text-indigo-600 px-2.5 py-1 rounded-full font-bold border border-indigo-100">
-                      <Unlock className="w-3 h-3" /> Editable
-                    </span>
-                  )}
+          {/* Submitted Cash Details Statement Card (only shown when submitted or closed) */}
+          {(isDrawerSubmitted || isDateAlreadyClosed) && (
+            <div className="bg-white rounded-2xl p-6 border border-indigo-100 shadow-sm">
+              <div className="flex items-center justify-between border-b border-slate-100 pb-3.5 mb-4">
+                <div>
+                  <h4 className="text-xs font-black text-indigo-950 uppercase tracking-wider flex items-center gap-2">
+                    <FileText className="w-4 h-4 text-indigo-600" />
+                    <span>Cash Details Statement ({selectedDate})</span>
+                  </h4>
+                  <p className="text-[10px] text-slate-400 font-medium mt-0.5">
+                    Status: {isDateAlreadyClosed ? 'Locked & Closed' : 'Verified Draft'}
+                  </p>
                 </div>
               </div>
 
-              {/* If NOT closed, show edit forms */}
-              {!isDateAlreadyClosed ? (
-                <div className="space-y-6">
-                  <form onSubmit={handleDrawerSubmit} className="space-y-6">
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                      {/* Cash Summary Details Form */}
-                      <div className="border border-slate-200/60 rounded-2xl p-4 bg-slate-50/50">
-                        <h4 className="text-xs font-black text-slate-700 uppercase tracking-wider mb-4 pb-2 border-b border-slate-200 flex items-center justify-between">
-                          <span>Cash Summary Details</span>
-                          <span className="text-[10px] font-bold text-slate-400">Amount (BDT)</span>
-                        </h4>
-                        <div className="space-y-3.5">
-                          {[
-                            { label: 'KHA Office Cash', value: khaOfficeCash, setter: setKhaOfficeCash, id: 'khaOfficeCash' },
-                            { label: 'Dhaka office', value: dhakaOfficeCash, setter: setDhakaOfficeCash, id: 'dhakaOfficeCash' },
-                            { label: 'Nayan Cash', value: nayanCash, setter: setNayanCash, id: 'nayanCash' },
-                            { label: 'Account Cash', value: accountCash, setter: setAccountCash, id: 'accountCash' },
-                          ].map((item) => (
-                            <div key={item.id} className="flex items-center justify-between gap-4">
-                              <label className="text-xs font-bold text-slate-600" htmlFor={item.id}>{item.label}</label>
-                              <div className="relative w-36">
-                                <span className="absolute left-3 top-2 text-[10px] font-bold text-slate-400">৳</span>
-                                <input
-                                  type="number"
-                                  id={item.id}
-                                  value={item.value}
-                                  onChange={(e) => item.setter(e.target.value)}
-                                  className="w-full text-xs pl-6 pr-3 py-1.5 bg-white border border-slate-200 rounded-xl text-slate-700 focus:ring-1 focus:ring-indigo-500 focus:outline-none font-bold font-mono text-right"
-                                />
-                              </div>
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-
-                      {/* Transfer Money Details Form */}
-                      <div className="border border-slate-200/60 rounded-2xl p-4 bg-slate-50/50">
-                        <h4 className="text-xs font-black text-slate-700 uppercase tracking-wider mb-4 pb-2 border-b border-slate-200 flex items-center justify-between">
-                          <span>Transfer Money Details</span>
-                          <span className="text-[10px] font-bold text-slate-400">Amount (BDT)</span>
-                        </h4>
-                        <div className="space-y-3.5">
-                          {[
-                            { label: 'KHA Office to Nayan', value: transferKhaToNayan, setter: setTransferKhaToNayan, id: 'transferKhaToNayan' },
-                            { label: 'Nayan to Dhaka office', value: transferNayanToDhaka, setter: setTransferNayanToDhaka, id: 'transferNayanToDhaka' },
-                            { label: 'Dhaka office to Nayan', value: transferDhakaToNayan, setter: setTransferDhakaToNayan, id: 'transferDhakaToNayan' },
-                            { label: 'Dhaka office to KHA Office', value: transferDhakaToKha, setter: setTransferDhakaToKha, id: 'transferDhakaToKha' },
-                          ].map((item) => (
-                            <div key={item.id} className="flex items-center justify-between gap-4">
-                              <label className="text-xs font-bold text-slate-600" htmlFor={item.id}>{item.label}</label>
-                              <div className="relative w-36">
-                                <span className="absolute left-3 top-2 text-[10px] font-bold text-slate-400">৳</span>
-                                <input
-                                  type="number"
-                                  id={item.id}
-                                  value={item.value}
-                                  onChange={(e) => item.setter(e.target.value)}
-                                  className="w-full text-xs pl-6 pr-3 py-1.5 bg-white border border-slate-200 rounded-xl text-slate-700 focus:ring-1 focus:ring-indigo-500 focus:outline-none font-bold font-mono text-right"
-                                />
-                              </div>
-                            </div>
-                          ))}
-                        </div>
-                      </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <div>
+                  <h5 className="text-[10px] font-extrabold text-slate-400 uppercase tracking-widest mb-2.5 pb-1 border-b border-slate-100 flex items-center justify-between">
+                    <span>Physical Cash Summary</span>
+                    <span>Amount (৳)</span>
+                  </h5>
+                  <div className="space-y-1.5 text-xs">
+                    <div className="flex justify-between py-1 border-b border-dashed border-slate-200">
+                      <span className="text-slate-500 font-medium">KHA Office Cash</span>
+                      <span className="font-mono font-bold text-slate-800">{val(khaOfficeCash).toLocaleString()} ৳</span>
                     </div>
-
-                    <div className="flex justify-end pt-2">
-                      <button
-                        type="submit"
-                        className="px-6 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white font-extrabold rounded-xl text-xs flex items-center gap-2 shadow-lg shadow-indigo-600/20 transition cursor-pointer"
-                      >
-                        <CheckCircle className="w-4 h-4" />
-                        Submit Drawer Statement
-                      </button>
+                    <div className="flex justify-between py-1 border-b border-dashed border-slate-200">
+                      <span className="text-slate-500 font-medium">Dhaka Office Cash</span>
+                      <span className="font-mono font-bold text-slate-800">{val(dhakaOfficeCash).toLocaleString()} ৳</span>
                     </div>
-                  </form>
-
-                  {/* If submitted, show beautiful statement layout underneath (niche diye) */}
-                  {isDrawerSubmitted && (
-                    <div className="border-t border-slate-100 pt-6 mt-6">
-                      <div className="bg-slate-50 border border-indigo-100 rounded-2xl p-5 relative overflow-hidden">
-                        <div className="absolute right-0 top-0 translate-x-10 -translate-y-10 w-40 h-40 bg-indigo-500/5 rounded-full blur-xl"></div>
-                        
-                        <div className="flex items-center justify-between border-b border-slate-200/80 pb-3.5 mb-4">
-                          <div>
-                            <h4 className="text-xs font-black text-indigo-950 uppercase tracking-wider flex items-center gap-1.5">
-                              <FileText className="w-4 h-4 text-indigo-600" />
-                              <span>Cash Drawer Official Statement</span>
-                            </h4>
-                            <p className="text-[10px] text-slate-400 font-medium">Record Date: {selectedDate} • Status: Verified Draft</p>
-                          </div>
-                          <button
-                            type="button"
-                            onClick={handleModifyDrawer}
-                            className="px-3 py-1.5 bg-rose-50 hover:bg-rose-100 text-rose-700 text-[10px] font-bold rounded-lg transition-all flex items-center gap-1 border border-rose-100 cursor-pointer"
-                          >
-                            Clear/Reset Statement
-                          </button>
-                        </div>
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                          {/* Cash Summary Column */}
-                          <div>
-                            <h5 className="text-[10px] font-extrabold text-slate-400 uppercase tracking-widest mb-3 pb-1 border-b border-slate-100 flex items-center justify-between">
-                              <span>Physical Cash summary</span>
-                              <span>Amount (৳)</span>
-                            </h5>
-                            <div className="space-y-2 text-xs">
-                              <div className="flex justify-between py-1 border-b border-dashed border-slate-200">
-                                <span className="text-slate-500 font-medium">KHA Office Cash</span>
-                                <span className="font-mono font-bold text-slate-800">{parseFloat(khaOfficeCash || '0').toLocaleString()} ৳</span>
-                              </div>
-                              <div className="flex justify-between py-1 border-b border-dashed border-slate-200">
-                                <span className="text-slate-500 font-medium">Dhaka Office Cash</span>
-                                <span className="font-mono font-bold text-slate-800">{parseFloat(dhakaOfficeCash || '0').toLocaleString()} ৳</span>
-                              </div>
-                              <div className="flex justify-between py-1 border-b border-dashed border-slate-200">
-                                <span className="text-slate-500 font-medium">Nayan Cash</span>
-                                <span className="font-mono font-bold text-slate-800">{parseFloat(nayanCash || '0').toLocaleString()} ৳</span>
-                              </div>
-                              <div className="flex justify-between py-1 border-b border-dashed border-slate-200">
-                                <span className="text-slate-500 font-medium">Account Cash</span>
-                                <span className="font-mono font-bold text-slate-800">{parseFloat(accountCash || '0').toLocaleString()} ৳</span>
-                              </div>
-                              <div className="flex justify-between pt-2.5 pb-1 text-indigo-700 font-bold border-t border-slate-200">
-                                <span>Total Physical Cash</span>
-                                <span className="font-mono text-sm font-black">
-                                  {(parseFloat(khaOfficeCash || '0') + parseFloat(dhakaOfficeCash || '0') + parseFloat(nayanCash || '0') + parseFloat(accountCash || '0')).toLocaleString()} ৳
-                                </span>
-                              </div>
-                            </div>
-                          </div>
-                          {/* Transfer Column */}
-                          <div>
-                            <h5 className="text-[10px] font-extrabold text-slate-400 uppercase tracking-widest mb-3 pb-1 border-b border-slate-100 flex items-center justify-between">
-                              <span>Transfer Details</span>
-                              <span>Amount (৳)</span>
-                            </h5>
-                            <div className="space-y-2 text-xs">
-                              <div className="flex justify-between py-1 border-b border-dashed border-slate-200">
-                                <span className="text-slate-500 font-medium">KHA to Nayan</span>
-                                <span className="font-mono font-bold text-slate-800">{parseFloat(transferKhaToNayan || '0').toLocaleString()} ৳</span>
-                              </div>
-                              <div className="flex justify-between py-1 border-b border-dashed border-slate-200">
-                                <span className="text-slate-500 font-medium">Nayan to Dhaka</span>
-                                <span className="font-mono font-bold text-slate-800">{parseFloat(transferNayanToDhaka || '0').toLocaleString()} ৳</span>
-                              </div>
-                              <div className="flex justify-between py-1 border-b border-dashed border-slate-200">
-                                <span className="text-slate-500 font-medium">Dhaka to Nayan</span>
-                                <span className="font-mono font-bold text-slate-800">{parseFloat(transferDhakaToNayan || '0').toLocaleString()} ৳</span>
-                              </div>
-                              <div className="flex justify-between py-1 border-b border-dashed border-slate-200">
-                                <span className="text-slate-500 font-medium">Dhaka to KHA</span>
-                                <span className="font-mono font-bold text-slate-800">{parseFloat(transferDhakaToKha || '0').toLocaleString()} ৳</span>
-                              </div>
-                            </div>
-                          </div>
-                        </div>
-                      </div>
+                    <div className="flex justify-between py-1 border-b border-dashed border-slate-200">
+                      <span className="text-slate-500 font-medium">Nayan Cash</span>
+                      <span className="font-mono font-bold text-slate-800">{val(nayanCash).toLocaleString()} ৳</span>
                     </div>
-                  )}
+                    <div className="flex justify-between py-1 border-b border-dashed border-slate-200">
+                      <span className="text-slate-500 font-medium">Account Cash</span>
+                      <span className="font-mono font-bold text-slate-800">{val(accountCash).toLocaleString()} ৳</span>
+                    </div>
+                    <div className="flex justify-between pt-2 text-indigo-700 font-bold">
+                      <span>Total Physical Cash</span>
+                      <span className="font-mono text-sm font-black">
+                        {(val(khaOfficeCash) + val(dhakaOfficeCash) + val(nayanCash) + val(accountCash)).toLocaleString()} ৳
+                      </span>
+                    </div>
+                  </div>
                 </div>
-              ) : (
-                <div className="text-center py-8">
-                  <p className="text-xs text-slate-400 font-bold">This day is closed and locked. Drawer statement submitted.</p>
+
+                <div>
+                  <h5 className="text-[10px] font-extrabold text-slate-400 uppercase tracking-widest mb-2.5 pb-1 border-b border-slate-100 flex items-center justify-between">
+                    <span>Money Transfers</span>
+                    <span>Amount (৳)</span>
+                  </h5>
+                  <div className="space-y-1.5 text-xs">
+                    <div className="flex justify-between py-1 border-b border-dashed border-slate-200">
+                      <span className="text-slate-500 font-medium">KHA Office to Nayan</span>
+                      <span className="font-mono font-bold text-slate-800">{val(transferKhaToNayan).toLocaleString()} ৳</span>
+                    </div>
+                    <div className="flex justify-between py-1 border-b border-dashed border-slate-200">
+                      <span className="text-slate-500 font-medium">Nayan to Dhaka office</span>
+                      <span className="font-mono font-bold text-slate-800">{val(transferNayanToDhaka).toLocaleString()} ৳</span>
+                    </div>
+                    <div className="flex justify-between py-1 border-b border-dashed border-slate-200">
+                      <span className="text-slate-500 font-medium">Dhaka office to Nayan</span>
+                      <span className="font-mono font-bold text-slate-800">{val(transferDhakaToNayan).toLocaleString()} ৳</span>
+                    </div>
+                    <div className="flex justify-between py-1 border-b border-dashed border-slate-200">
+                      <span className="text-slate-500 font-medium">Dhaka office to KHA Office</span>
+                      <span className="font-mono font-bold text-slate-800">{val(transferDhakaToKha).toLocaleString()} ৳</span>
+                    </div>
+                    <div className="flex justify-between pt-2 text-slate-700 font-bold">
+                      <span>Total Transfers</span>
+                      <span className="font-mono text-sm font-black">
+                        {(val(transferKhaToNayan) + val(transferNayanToDhaka) + val(transferDhakaToNayan) + val(transferDhakaToKha)).toLocaleString()} ৳
+                      </span>
+                    </div>
+                  </div>
                 </div>
-              )}
+              </div>
             </div>
           )}
-
-                  /* If closed, show ONLY the beautiful report layout */
-                  <div className="space-y-6">
-                    <div className="bg-slate-50 border border-indigo-100 rounded-2xl p-5 relative overflow-hidden">
-                      <div className="absolute right-0 top-0 translate-x-10 -translate-y-10 w-40 h-40 bg-indigo-500/5 rounded-full blur-xl"></div>
-                      
-                      <div className="flex items-center justify-between border-b border-slate-200/80 pb-3.5 mb-4">
-                        <div>
-                          <h4 className="text-xs font-black text-indigo-950 uppercase tracking-wider flex items-center gap-1.5">
-                            <FileText className="w-4 h-4 text-indigo-600" />
-                            <span>Cash Drawer Official Statement</span>
-                          </h4>
-                          <p className="text-[10px] text-slate-400 font-medium">Record Date: {selectedDate} • Status: Locked &amp; Closed</p>
-                        </div>
-                      </div>
-
-                      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                        {/* Cash Summary Column */}
-                        <div>
-                          <h5 className="text-[10px] font-extrabold text-slate-400 uppercase tracking-widest mb-3 pb-1 border-b border-slate-100 flex items-center justify-between">
-                            <span>Physical Cash summary</span>
-                            <span>Amount (৳)</span>
-                          </h5>
-                          <div className="space-y-2 text-xs">
-                            <div className="flex justify-between py-1 border-b border-dashed border-slate-200">
-                              <span className="text-slate-500 font-medium">KHA Office Cash</span>
-                              <span className="font-mono font-bold text-slate-800">{parseFloat(khaOfficeCash || '0').toLocaleString()} ৳</span>
-                            </div>
-                            <div className="flex justify-between py-1 border-b border-dashed border-slate-200">
-                              <span className="text-slate-500 font-medium">Dhaka Office Cash</span>
-                              <span className="font-mono font-bold text-slate-800">{parseFloat(dhakaOfficeCash || '0').toLocaleString()} ৳</span>
-                            </div>
-                            <div className="flex justify-between py-1 border-b border-dashed border-slate-200">
-                              <span className="text-slate-500 font-medium">Nayan Cash</span>
-                              <span className="font-mono font-bold text-slate-800">{parseFloat(nayanCash || '0').toLocaleString()} ৳</span>
-                            </div>
-                            <div className="flex justify-between py-1 border-b border-dashed border-slate-200">
-                              <span className="text-slate-500 font-medium">Account Cash</span>
-                              <span className="font-mono font-bold text-slate-800">{parseFloat(accountCash || '0').toLocaleString()} ৳</span>
-                            </div>
-                            <div className="flex justify-between pt-2.5 pb-1 text-indigo-700 font-bold border-t border-slate-200">
-                              <span>Total Physical Cash</span>
-                              <span className="font-mono text-sm font-black">
-                                {(parseFloat(khaOfficeCash || '0') + parseFloat(dhakaOfficeCash || '0') + parseFloat(nayanCash || '0') + parseFloat(accountCash || '0')).toLocaleString()} ৳
-                              </span>
-                            </div>
-                          </div>
-                        </div>
-
-                        {/* Transfers Column */}
-                        <div>
-                          <h5 className="text-[10px] font-extrabold text-slate-400 uppercase tracking-widest mb-3 pb-1 border-b border-slate-100 flex items-center justify-between">
-                            <span>Money Transfers</span>
-                            <span>Amount (৳)</span>
-                          </h5>
-                          <div className="space-y-2 text-xs">
-                            <div className="flex justify-between py-1 border-b border-dashed border-slate-200">
-                              <span className="text-slate-500 font-medium">KHA Office to Nayan</span>
-                              <span className="font-mono font-bold text-slate-800">{parseFloat(transferKhaToNayan || '0').toLocaleString()} ৳</span>
-                            </div>
-                            <div className="flex justify-between py-1 border-b border-dashed border-slate-200">
-                              <span className="text-slate-500 font-medium">Nayan to Dhaka office</span>
-                              <span className="font-mono font-bold text-slate-800">{parseFloat(transferNayanToDhaka || '0').toLocaleString()} ৳</span>
-                            </div>
-                            <div className="flex justify-between py-1 border-b border-dashed border-slate-200">
-                              <span className="text-slate-500 font-medium">Dhaka office to Nayan</span>
-                              <span className="font-mono font-bold text-slate-800">{parseFloat(transferDhakaToNayan || '0').toLocaleString()} ৳</span>
-                            </div>
-                            <div className="flex justify-between py-1 border-b border-dashed border-slate-200">
-                              <span className="text-slate-500 font-medium">Dhaka office to KHA Office</span>
-                              <span className="font-mono font-bold text-slate-800">{parseFloat(transferDhakaToKha || '0').toLocaleString()} ৳</span>
-                            </div>
-                            <div className="flex justify-between pt-2.5 pb-1 text-slate-700 font-bold border-t border-slate-200">
-                              <span>Total Cash Transfers</span>
-                              <span className="font-mono text-sm font-extrabold text-slate-800">
-                                {(parseFloat(transferKhaToNayan || '0') + parseFloat(transferNayanToDhaka || '0') + parseFloat(transferDhakaToNayan || '0') + parseFloat(transferDhakaToKha || '0')).toLocaleString()} ৳
-                              </span>
-                            </div>
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
 
         </div>
         {/* Right Column: Submission Form / Closing Status */}
@@ -2893,9 +2740,9 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile }
                   <PaymentMethodLogo method="cash" className="w-6 h-6" />
                   <span>Cash</span>
                 </div>
-                <div className="text-right font-mono text-slate-600">{selectedClosing.openingCash.toLocaleString()}</div>
-                <div className="text-right font-mono text-emerald-600">+{selectedClosing.totalCashIn.toLocaleString()}</div>
-                <div className="text-right font-mono text-slate-800 font-bold">{selectedClosing.closingCash.toLocaleString()}</div>
+                <div className="text-right font-mono text-slate-600">{(selectedClosing.openingCash ?? 0).toLocaleString()}</div>
+                <div className="text-right font-mono text-emerald-600">+{(selectedClosing.totalCashIn ?? 0).toLocaleString()}</div>
+                <div className="text-right font-mono text-slate-800 font-bold">{(selectedClosing.closingCash ?? 0).toLocaleString()}</div>
               </div>
 
               {/* bKash */}
@@ -2904,9 +2751,9 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile }
                   <PaymentMethodLogo method="bkash" className="w-6 h-6" />
                   <span>bKash</span>
                 </div>
-                <div className="text-right font-mono text-slate-600">{selectedClosing.openingBkash.toLocaleString()}</div>
-                <div className="text-right font-mono text-emerald-600">+{selectedClosing.totalBkashIn.toLocaleString()}</div>
-                <div className="text-right font-mono text-slate-800 font-bold">{selectedClosing.closingBkash.toLocaleString()}</div>
+                <div className="text-right font-mono text-slate-600">{(selectedClosing.openingBkash ?? 0).toLocaleString()}</div>
+                <div className="text-right font-mono text-emerald-600">+{(selectedClosing.totalBkashIn ?? 0).toLocaleString()}</div>
+                <div className="text-right font-mono text-slate-800 font-bold">{(selectedClosing.closingBkash ?? 0).toLocaleString()}</div>
               </div>
 
               {/* Nagad */}
@@ -2915,9 +2762,9 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile }
                   <PaymentMethodLogo method="nagad" className="w-6 h-6" />
                   <span>Nagad</span>
                 </div>
-                <div className="text-right font-mono text-slate-600">{selectedClosing.openingNagad.toLocaleString()}</div>
-                <div className="text-right font-mono text-emerald-600">+{selectedClosing.totalNagadIn.toLocaleString()}</div>
-                <div className="text-right font-mono text-slate-800 font-bold">{selectedClosing.closingNagad.toLocaleString()}</div>
+                <div className="text-right font-mono text-slate-600">{(selectedClosing.openingNagad ?? 0).toLocaleString()}</div>
+                <div className="text-right font-mono text-emerald-600">+{(selectedClosing.totalNagadIn ?? 0).toLocaleString()}</div>
+                <div className="text-right font-mono text-slate-800 font-bold">{(selectedClosing.closingNagad ?? 0).toLocaleString()}</div>
               </div>
 
               {/* Rocket */}
@@ -2926,9 +2773,9 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile }
                   <PaymentMethodLogo method="rocket" className="w-6 h-6" />
                   <span>Rocket</span>
                 </div>
-                <div className="text-right font-mono text-slate-600">{selectedClosing.openingRocket.toLocaleString()}</div>
-                <div className="text-right font-mono text-emerald-600">+{selectedClosing.totalRocketIn.toLocaleString()}</div>
-                <div className="text-right font-mono text-slate-800 font-bold">{selectedClosing.closingRocket.toLocaleString()}</div>
+                <div className="text-right font-mono text-slate-600">{(selectedClosing.openingRocket ?? 0).toLocaleString()}</div>
+                <div className="text-right font-mono text-emerald-600">+{(selectedClosing.totalRocketIn ?? 0).toLocaleString()}</div>
+                <div className="text-right font-mono text-slate-800 font-bold">{(selectedClosing.closingRocket ?? 0).toLocaleString()}</div>
               </div>
 
               {/* Bank */}
@@ -2937,9 +2784,9 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile }
                   <PaymentMethodLogo method="bank" className="w-6 h-6" />
                   <span>Bank Transfer</span>
                 </div>
-                <div className="text-right font-mono text-slate-600">{selectedClosing.openingBank.toLocaleString()}</div>
-                <div className="text-right font-mono text-emerald-600">+{selectedClosing.totalBankIn.toLocaleString()}</div>
-                <div className="text-right font-mono text-slate-800 font-bold">{selectedClosing.closingBank.toLocaleString()}</div>
+                <div className="text-right font-mono text-slate-600">{(selectedClosing.openingBank ?? 0).toLocaleString()}</div>
+                <div className="text-right font-mono text-emerald-600">+{(selectedClosing.totalBankIn ?? 0).toLocaleString()}</div>
+                <div className="text-right font-mono text-slate-800 font-bold">{(selectedClosing.closingBank ?? 0).toLocaleString()}</div>
               </div>
 
               {/* SSL */}
@@ -2948,28 +2795,28 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile }
                   <PaymentMethodLogo method="sslcommerz" className="w-6 h-6" />
                   <span>SSL Commerz</span>
                 </div>
-                <div className="text-right font-mono text-slate-600">{selectedClosing.openingSsl.toLocaleString()}</div>
-                <div className="text-right font-mono text-emerald-600">+{selectedClosing.totalSslIn.toLocaleString()}</div>
-                <div className="text-right font-mono text-slate-800 font-bold">{selectedClosing.closingSsl.toLocaleString()}</div>
+                <div className="text-right font-mono text-slate-600">{(selectedClosing.openingSsl ?? 0).toLocaleString()}</div>
+                <div className="text-right font-mono text-emerald-600">+{(selectedClosing.totalSslIn ?? 0).toLocaleString()}</div>
+                <div className="text-right font-mono text-slate-800 font-bold">{(selectedClosing.closingSsl ?? 0).toLocaleString()}</div>
               </div>
 
               {/* Total Summary Row */}
               <div className="bg-indigo-50 border border-indigo-100 rounded-xl p-4 space-y-2 mt-4 font-mono text-xs font-semibold text-slate-700">
                 <div className="flex justify-between">
                   <span>Total Opening Balance:</span>
-                  <span>{(selectedClosing.openingCash + selectedClosing.openingBkash + selectedClosing.openingNagad + selectedClosing.openingRocket + selectedClosing.openingBank + selectedClosing.openingSsl).toLocaleString()} BDT</span>
+                  <span>{((selectedClosing.openingCash ?? 0) + (selectedClosing.openingBkash ?? 0) + (selectedClosing.openingNagad ?? 0) + (selectedClosing.openingRocket ?? 0) + (selectedClosing.openingBank ?? 0) + (selectedClosing.openingSsl ?? 0)).toLocaleString()} BDT</span>
                 </div>
                 <div className="flex justify-between text-emerald-600">
                   <span>(+) Total Collection (Inflow):</span>
-                  <span>+{(selectedClosing.totalCashIn + selectedClosing.totalBkashIn + selectedClosing.totalNagadIn + selectedClosing.totalRocketIn + selectedClosing.totalBankIn + selectedClosing.totalSslIn).toLocaleString()} BDT</span>
+                  <span>+{((selectedClosing.totalCashIn ?? 0) + (selectedClosing.totalBkashIn ?? 0) + (selectedClosing.totalNagadIn ?? 0) + (selectedClosing.totalRocketIn ?? 0) + (selectedClosing.totalBankIn ?? 0) + (selectedClosing.totalSslIn ?? 0)).toLocaleString()} BDT</span>
                 </div>
                 <div className="flex justify-between text-rose-600">
                   <span>(-) Total Expense (Outflow):</span>
-                  <span>-{(selectedClosing.totalCashOut + selectedClosing.totalBkashOut + selectedClosing.totalNagadOut + selectedClosing.totalRocketOut + selectedClosing.totalBankOut + selectedClosing.totalSslOut).toLocaleString()} BDT</span>
+                  <span>-{((selectedClosing.totalCashOut ?? 0) + (selectedClosing.totalBkashOut ?? 0) + (selectedClosing.totalNagadOut ?? 0) + (selectedClosing.totalRocketOut ?? 0) + (selectedClosing.totalBankOut ?? 0) + (selectedClosing.totalSslOut ?? 0)).toLocaleString()} BDT</span>
                 </div>
                 <div className="flex justify-between border-t border-indigo-100 pt-2 text-indigo-900 font-extrabold text-sm">
                   <span>(=) Grand Closing Balance:</span>
-                  <span>{(selectedClosing.closingCash + selectedClosing.closingBkash + selectedClosing.closingNagad + selectedClosing.closingRocket + selectedClosing.closingBank + selectedClosing.closingSsl).toLocaleString()} BDT</span>
+                  <span>{((selectedClosing.closingCash ?? 0) + (selectedClosing.closingBkash ?? 0) + (selectedClosing.closingNagad ?? 0) + (selectedClosing.closingRocket ?? 0) + (selectedClosing.closingBank ?? 0) + (selectedClosing.closingSsl ?? 0)).toLocaleString()} BDT</span>
                 </div>
               </div>
 
@@ -3197,6 +3044,445 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile }
                 </button>
               </div>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Income Statement Entry Popup Modal */}
+      {activeEntryModal === 'income' && (
+        <div
+          className="fixed inset-0 bg-slate-900/60 backdrop-blur-[2px] z-[90] flex items-center justify-center p-4 animate-fade-in"
+          onClick={() => setActiveEntryModal(null)}
+        >
+          <div
+            className="bg-white rounded-3xl max-w-lg w-full p-6 shadow-2xl relative overflow-hidden animate-scale-up border border-slate-100"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between border-b border-slate-100 pb-4 mb-5">
+              <div className="flex items-center gap-3">
+                <span className="p-2.5 bg-emerald-50 text-emerald-600 rounded-xl">
+                  <TrendingUp className="w-5 h-5" />
+                </span>
+                <div>
+                  <h3 className="text-base font-extrabold text-slate-800">Daily Income Statement Entry</h3>
+                  <p className="text-[11px] text-slate-400 mt-0.5 font-mono">Record Date: {selectedDate}</p>
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                {isDateAlreadyClosed && (
+                  <span className="flex items-center gap-1 text-[10px] bg-rose-50 text-rose-600 px-2.5 py-1 rounded-full font-bold border border-rose-100">
+                    <Lock className="w-3 h-3" /> Locked
+                  </span>
+                )}
+                <button
+                  type="button"
+                  onClick={() => setActiveEntryModal(null)}
+                  className="p-1.5 text-slate-400 hover:text-slate-600 rounded-lg hover:bg-slate-100 transition cursor-pointer"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+            </div>
+
+            {error && (
+              <div className="mb-4 p-3 bg-rose-50 border border-rose-100 rounded-xl text-rose-700 text-xs flex items-center gap-2">
+                <AlertCircle className="w-4 h-4 shrink-0 text-rose-500" />
+                <span className="font-semibold">{error}</span>
+              </div>
+            )}
+
+            {isDateAlreadyClosed ? (
+              <div className="py-8 text-center space-y-3">
+                <div className="w-12 h-12 rounded-2xl bg-rose-50 text-rose-500 flex items-center justify-center mx-auto">
+                  <Lock className="w-6 h-6" />
+                </div>
+                <p className="text-xs font-bold text-slate-600">
+                  {selectedDate} is locked and closed. Reopen the day from Closing Summary to add new income entries.
+                </p>
+                <button
+                  type="button"
+                  onClick={() => setActiveEntryModal(null)}
+                  className="px-5 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold rounded-xl transition cursor-pointer"
+                >
+                  Close
+                </button>
+              </div>
+            ) : (
+              <form onSubmit={handleAddEntryStatement} className="space-y-4">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1.5">Category</label>
+                    <select
+                      value={entryCategory}
+                      onChange={(e) => setEntryCategory(e.target.value)}
+                      className="w-full text-xs px-3 py-2.5 bg-white border border-slate-200 rounded-xl text-slate-700 focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 focus:outline-none font-bold cursor-pointer"
+                    >
+                      <option value="customer_bill">Customer Bill</option>
+                      <option value="reseller_bill">Reseller Bill</option>
+                      <option value="service_charge">Service Charge</option>
+                      <option value="other_income">Other</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1.5">Payment Method</label>
+                    <select
+                      value={entryPaymentMethod}
+                      onChange={(e) => setEntryPaymentMethod(e.target.value)}
+                      className="w-full text-xs px-3 py-2.5 bg-white border border-slate-200 rounded-xl text-slate-700 focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 focus:outline-none font-bold cursor-pointer"
+                    >
+                      <option value="cash">Cash</option>
+                      <option value="bkash">bKash</option>
+                      <option value="nagad">Nagad</option>
+                      <option value="rocket">Rocket</option>
+                      <option value="bank">Bank Transfer</option>
+                      <option value="sslcommerz">SSL Commerz</option>
+                    </select>
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1.5">Today Income Amount (BDT)</label>
+                  <input
+                    type="number"
+                    placeholder="0.00"
+                    value={entryAmount}
+                    onChange={(e) => setEntryAmount(e.target.value)}
+                    className="w-full text-sm px-3.5 py-2.5 bg-white border border-slate-200 rounded-xl text-slate-800 focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 focus:outline-none font-bold font-mono"
+                    autoFocus
+                    required
+                  />
+                </div>
+
+                <div className="p-3.5 bg-emerald-50/60 border border-emerald-100 rounded-xl flex items-center justify-between text-xs font-mono">
+                  <div>
+                    <span className="text-[10px] font-bold text-slate-400 uppercase block">Opening ({entryPaymentMethod})</span>
+                    <span className="font-bold text-slate-700">{entryPreviousBalance.toLocaleString()} BDT</span>
+                  </div>
+                  <div className="text-right">
+                    <span className="text-[10px] font-bold text-emerald-600 uppercase block">Projected Balance</span>
+                    <span className="font-extrabold text-emerald-700">{entryClosingBalance.toLocaleString()} BDT</span>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-3 pt-2">
+                  <button
+                    type="submit"
+                    className="flex-1 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-extrabold rounded-xl flex items-center justify-center gap-2 transition cursor-pointer shadow-lg shadow-emerald-600/20"
+                  >
+                    <PlusCircle className="w-4 h-4" />
+                    <span>Add Income Statement</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setActiveEntryModal(null)}
+                    className="py-2.5 px-5 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold rounded-xl transition cursor-pointer"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </form>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Expense Statement Entry Popup Modal */}
+      {activeEntryModal === 'expense' && (
+        <div
+          className="fixed inset-0 bg-slate-900/60 backdrop-blur-[2px] z-[90] flex items-center justify-center p-4 animate-fade-in"
+          onClick={() => setActiveEntryModal(null)}
+        >
+          <div
+            className="bg-white rounded-3xl max-w-lg w-full p-6 shadow-2xl relative overflow-hidden animate-scale-up border border-slate-100"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between border-b border-slate-100 pb-4 mb-5">
+              <div className="flex items-center gap-3">
+                <span className="p-2.5 bg-rose-50 text-rose-600 rounded-xl">
+                  <TrendingDown className="w-5 h-5" />
+                </span>
+                <div>
+                  <h3 className="text-base font-extrabold text-slate-800">Daily Expense Statement Entry</h3>
+                  <p className="text-[11px] text-slate-400 mt-0.5 font-mono">Record Date: {selectedDate}</p>
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                {isDateAlreadyClosed && (
+                  <span className="flex items-center gap-1 text-[10px] bg-rose-50 text-rose-600 px-2.5 py-1 rounded-full font-bold border border-rose-100">
+                    <Lock className="w-3 h-3" /> Locked
+                  </span>
+                )}
+                <button
+                  type="button"
+                  onClick={() => setActiveEntryModal(null)}
+                  className="p-1.5 text-slate-400 hover:text-slate-600 rounded-lg hover:bg-slate-100 transition cursor-pointer"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+            </div>
+
+            {error && (
+              <div className="mb-4 p-3 bg-rose-50 border border-rose-100 rounded-xl text-rose-700 text-xs flex items-center gap-2">
+                <AlertCircle className="w-4 h-4 shrink-0 text-rose-500" />
+                <span className="font-semibold">{error}</span>
+              </div>
+            )}
+
+            {isDateAlreadyClosed ? (
+              <div className="py-8 text-center space-y-3">
+                <div className="w-12 h-12 rounded-2xl bg-rose-50 text-rose-500 flex items-center justify-center mx-auto">
+                  <Lock className="w-6 h-6" />
+                </div>
+                <p className="text-xs font-bold text-slate-600">
+                  {selectedDate} is locked and closed. Reopen the day from Closing Summary to add new expense entries.
+                </p>
+                <button
+                  type="button"
+                  onClick={() => setActiveEntryModal(null)}
+                  className="px-5 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold rounded-xl transition cursor-pointer"
+                >
+                  Close
+                </button>
+              </div>
+            ) : (
+              <form onSubmit={handleAddExpenseEntryStatement} className="space-y-4">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1.5">Category</label>
+                    <select
+                      value={expenseCategory}
+                      onChange={(e) => setExpenseCategory(e.target.value)}
+                      className="w-full text-xs px-3 py-2.5 bg-white border border-slate-200 rounded-xl text-slate-700 focus:ring-2 focus:ring-rose-500/20 focus:border-rose-500 focus:outline-none font-bold cursor-pointer"
+                    >
+                      {Object.entries(EXPENSE_CATEGORY_LABELS).map(([key, item]) => (
+                        <option key={key} value={key}>
+                          {item.label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1.5">Payment Method</label>
+                    <select
+                      value={expensePaymentMethod}
+                      onChange={(e) => setExpensePaymentMethod(e.target.value)}
+                      className="w-full text-xs px-3 py-2.5 bg-white border border-slate-200 rounded-xl text-slate-700 focus:ring-2 focus:ring-rose-500/20 focus:border-rose-500 focus:outline-none font-bold capitalize cursor-pointer"
+                    >
+                      <option value="cash">Cash</option>
+                      <option value="bkash">bKash</option>
+                      <option value="nagad">Nagad</option>
+                      <option value="rocket">Rocket</option>
+                      <option value="bank">Bank Transfer</option>
+                      <option value="sslcommerz">SSL Commerz</option>
+                    </select>
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1.5">Today Expense Amount (BDT)</label>
+                  <input
+                    type="number"
+                    placeholder="0.00"
+                    value={expenseAmount}
+                    onChange={(e) => setExpenseAmount(e.target.value)}
+                    className="w-full text-sm px-3.5 py-2.5 bg-white border border-slate-200 rounded-xl text-slate-800 focus:ring-2 focus:ring-rose-500/20 focus:border-rose-500 focus:outline-none font-bold font-mono"
+                    autoFocus
+                    required
+                  />
+                </div>
+
+                <div className="p-3.5 bg-rose-50/60 border border-rose-100 rounded-xl flex items-center justify-between text-xs font-mono">
+                  <div>
+                    <span className="text-[10px] font-bold text-slate-400 uppercase block">Opening ({expensePaymentMethod})</span>
+                    <span className="font-bold text-slate-700">{getPreviousBalanceForMethod(expensePaymentMethod).toLocaleString()} BDT</span>
+                  </div>
+                  <div className="text-right">
+                    <span className="text-[10px] font-bold text-rose-600 uppercase block">After Expense</span>
+                    <span className="font-extrabold text-rose-700">
+                      {(getPreviousBalanceForMethod(expensePaymentMethod) - (parseFloat(expenseAmount) || 0)).toLocaleString()} BDT
+                    </span>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-3 pt-2">
+                  <button
+                    type="submit"
+                    className="flex-1 py-2.5 bg-rose-600 hover:bg-rose-700 text-white text-xs font-extrabold rounded-xl flex items-center justify-center gap-2 transition cursor-pointer shadow-lg shadow-rose-600/20"
+                  >
+                    <Plus className="w-4 h-4" />
+                    <span>Add Expense Statement</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setActiveEntryModal(null)}
+                    className="py-2.5 px-5 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold rounded-xl transition cursor-pointer"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </form>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Cash Details Statement Popup Modal */}
+      {activeEntryModal === 'cash_details' && (
+        <div
+          className="fixed inset-0 bg-slate-900/60 backdrop-blur-[2px] z-[90] flex items-center justify-center p-4 overflow-y-auto animate-fade-in"
+          onClick={() => setActiveEntryModal(null)}
+        >
+          <div
+            className="bg-white rounded-3xl max-w-2xl w-full p-6 shadow-2xl relative overflow-hidden animate-scale-up border border-slate-100 my-8"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between border-b border-slate-100 pb-4 mb-5">
+              <div className="flex items-center gap-3">
+                <span className="p-2.5 bg-indigo-50 text-indigo-600 rounded-xl">
+                  <Coins className="w-5 h-5" />
+                </span>
+                <div>
+                  <h3 className="text-base font-extrabold text-slate-800">Cash Details Statement</h3>
+                  <p className="text-[11px] text-slate-400 mt-0.5 font-mono">Record Date: {selectedDate} • Physical Cash & Transfers</p>
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                {isDateAlreadyClosed ? (
+                  <span className="flex items-center gap-1 text-[10px] bg-rose-50 text-rose-600 px-2.5 py-1 rounded-full font-bold border border-rose-100">
+                    <Lock className="w-3 h-3" /> Locked
+                  </span>
+                ) : isDrawerSubmitted ? (
+                  <span className="flex items-center gap-1 text-[10px] bg-emerald-50 text-emerald-600 px-2.5 py-1 rounded-full font-bold border border-emerald-100">
+                    <CheckCircle className="w-3 h-3" /> Submitted
+                  </span>
+                ) : (
+                  <span className="flex items-center gap-1 text-[10px] bg-indigo-50 text-indigo-600 px-2.5 py-1 rounded-full font-bold border border-indigo-100">
+                    <Unlock className="w-3 h-3" /> Editable
+                  </span>
+                )}
+                <button
+                  type="button"
+                  onClick={() => setActiveEntryModal(null)}
+                  className="p-1.5 text-slate-400 hover:text-slate-600 rounded-lg hover:bg-slate-100 transition cursor-pointer"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+            </div>
+
+            {error && (
+              <div className="mb-4 p-3 bg-rose-50 border border-rose-100 rounded-xl text-rose-700 text-xs flex items-center gap-2">
+                <AlertCircle className="w-4 h-4 shrink-0 text-rose-500" />
+                <span className="font-semibold">{error}</span>
+              </div>
+            )}
+
+            <form onSubmit={handleDrawerSubmit} className="space-y-5">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+                {/* Cash Summary Details */}
+                <div className="border border-slate-200/60 rounded-2xl p-4 bg-slate-50/50">
+                  <h4 className="text-xs font-black text-slate-700 uppercase tracking-wider mb-4 pb-2 border-b border-slate-200 flex items-center justify-between">
+                    <span>Cash Summary Details</span>
+                    <span className="text-[10px] font-bold text-slate-400">BDT</span>
+                  </h4>
+                  <div className="space-y-3">
+                    {[
+                      { label: 'KHA Office Cash', value: khaOfficeCash, setter: setKhaOfficeCash, id: 'modalKhaOfficeCash' },
+                      { label: 'Dhaka office', value: dhakaOfficeCash, setter: setDhakaOfficeCash, id: 'modalDhakaOfficeCash' },
+                      { label: 'Nayan Cash', value: nayanCash, setter: setNayanCash, id: 'modalNayanCash' },
+                      { label: 'Account Cash', value: accountCash, setter: setAccountCash, id: 'modalAccountCash' },
+                    ].map((item) => (
+                      <div key={item.id} className="flex items-center justify-between gap-3">
+                        <label className="text-xs font-bold text-slate-600" htmlFor={item.id}>{item.label}</label>
+                        <div className="relative w-32">
+                          <span className="absolute left-3 top-2 text-[10px] font-bold text-slate-400">৳</span>
+                          <input
+                            type="number"
+                            id={item.id}
+                            value={item.value}
+                            disabled={isDateAlreadyClosed}
+                            onChange={(e) => item.setter(e.target.value)}
+                            className="w-full text-xs pl-6 pr-3 py-1.5 bg-white border border-slate-200 rounded-xl text-slate-700 focus:ring-1 focus:ring-indigo-500 focus:outline-none font-bold font-mono text-right disabled:bg-slate-100 disabled:text-slate-500"
+                          />
+                        </div>
+                      </div>
+                    ))}
+                    <div className="pt-2.5 mt-2 border-t border-slate-200 flex items-center justify-between text-xs font-extrabold text-indigo-700">
+                      <span>Total Physical Cash</span>
+                      <span className="font-mono">
+                        {(val(khaOfficeCash) + val(dhakaOfficeCash) + val(nayanCash) + val(accountCash)).toLocaleString()} ৳
+                      </span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Transfer Money Details */}
+                <div className="border border-slate-200/60 rounded-2xl p-4 bg-slate-50/50">
+                  <h4 className="text-xs font-black text-slate-700 uppercase tracking-wider mb-4 pb-2 border-b border-slate-200 flex items-center justify-between">
+                    <span>Transfer Money Details</span>
+                    <span className="text-[10px] font-bold text-slate-400">BDT</span>
+                  </h4>
+                  <div className="space-y-3">
+                    {[
+                      { label: 'KHA Office to Nayan', value: transferKhaToNayan, setter: setTransferKhaToNayan, id: 'modalTransferKhaToNayan' },
+                      { label: 'Nayan to Dhaka office', value: transferNayanToDhaka, setter: setTransferNayanToDhaka, id: 'modalTransferNayanToDhaka' },
+                      { label: 'Dhaka office to Nayan', value: transferDhakaToNayan, setter: setTransferDhakaToNayan, id: 'modalTransferDhakaToNayan' },
+                      { label: 'Dhaka to KHA Office', value: transferDhakaToKha, setter: setTransferDhakaToKha, id: 'modalTransferDhakaToKha' },
+                    ].map((item) => (
+                      <div key={item.id} className="flex items-center justify-between gap-3">
+                        <label className="text-xs font-bold text-slate-600" htmlFor={item.id}>{item.label}</label>
+                        <div className="relative w-32">
+                          <span className="absolute left-3 top-2 text-[10px] font-bold text-slate-400">৳</span>
+                          <input
+                            type="number"
+                            id={item.id}
+                            value={item.value}
+                            disabled={isDateAlreadyClosed}
+                            onChange={(e) => item.setter(e.target.value)}
+                            className="w-full text-xs pl-6 pr-3 py-1.5 bg-white border border-slate-200 rounded-xl text-slate-700 focus:ring-1 focus:ring-indigo-500 focus:outline-none font-bold font-mono text-right disabled:bg-slate-100 disabled:text-slate-500"
+                          />
+                        </div>
+                      </div>
+                    ))}
+                    <div className="pt-2.5 mt-2 border-t border-slate-200 flex items-center justify-between text-xs font-extrabold text-slate-700">
+                      <span>Total Transfers</span>
+                      <span className="font-mono">
+                        {(val(transferKhaToNayan) + val(transferNayanToDhaka) + val(transferDhakaToNayan) + val(transferDhakaToKha)).toLocaleString()} ৳
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div className="flex items-center justify-end gap-3 pt-2">
+                {!isDateAlreadyClosed && isDrawerSubmitted && (
+                  <button
+                    type="button"
+                    onClick={handleModifyDrawer}
+                    className="py-2.5 px-4 bg-rose-50 hover:bg-rose-100 text-rose-700 text-xs font-bold rounded-xl border border-rose-100 transition cursor-pointer"
+                  >
+                    Reset Draft
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => setActiveEntryModal(null)}
+                  className="py-2.5 px-5 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold rounded-xl transition cursor-pointer"
+                >
+                  {isDateAlreadyClosed ? 'Close' : 'Cancel'}
+                </button>
+                {!isDateAlreadyClosed && (
+                  <button
+                    type="submit"
+                    className="px-6 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white font-extrabold rounded-xl text-xs flex items-center gap-2 shadow-lg shadow-indigo-600/20 transition cursor-pointer"
+                  >
+                    <CheckCircle className="w-4 h-4" />
+                    <span>Submit Cash Details</span>
+                  </button>
+                )}
+              </div>
+            </form>
           </div>
         </div>
       )}

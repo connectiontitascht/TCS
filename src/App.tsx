@@ -1047,7 +1047,11 @@ export default function App() {
 
           {/* Section 7: Daily closing audit and locked states */}
           {activeSection === 'daily_closing' && (
-            <DailyClosingSection userId={user.uid} transactions={transactions} currentUserProfile={currentUserProfile} />
+            <DailyClosingSection
+              userId={user.uid}
+              transactions={transactions}
+              currentUserProfile={currentUserProfile}
+            />
           )}
 
           {/* Section 8: System Users & RBAC Administrative dashboard */}
