@@ -123,6 +123,7 @@ export interface TransportLog {
   fromLocation: string;
   toLocation: string;
   reason: string;
+  person?: string;
   amount: number;
 }
 
@@ -132,6 +133,18 @@ export interface VoucherItem {
   uom: string;
   quantity: number;
   amount: number;
+}
+
+export interface SalaryLog {
+  employeeName: string;
+  month: string;
+  basicSalary: number;
+  houseRent: number;
+  medicalAllowance: number;
+  transport: number;
+  overtime: number;
+  mobileBill: number;
+  totalAmount: number;
 }
 
 export interface Voucher {
@@ -150,6 +163,7 @@ export interface Voucher {
   attachmentData?: string;
   transportLogs?: TransportLog[];
   items?: VoucherItem[];
+  salaryLogs?: SalaryLog[];
   supervisorApprovedBy?: string;
   managerApprovedBy?: string;
   accountsApprovedBy?: string;

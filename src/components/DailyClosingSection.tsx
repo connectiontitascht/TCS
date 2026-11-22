@@ -20,7 +20,8 @@ import {
   FileDown,
   Filter,
   MoreVertical,
-  X
+  X,
+  FileSpreadsheet
 } from 'lucide-react';
 import { 
   collection, 
@@ -40,23 +41,39 @@ import { Transaction, DailyClosing, ExpenseCategory, EXPENSE_CATEGORY_LABELS, Ap
 import { PaymentMethodLogo } from './PaymentLogos';
 import { jsPDF } from 'jspdf';
 import autoTable from 'jspdf-autotable';
+import * as XLSX from 'xlsx';
 
 interface DailyClosingSectionProps {
   userId: string;
   transactions: Transaction[];
   currentUserProfile?: AppUser | null;
-  modalTrigger?: { type: 'income' | 'expense' | 'cash_details'; id: number } | null;
+  modalTrigger?: { type: 'income' | 'expense' | 'cash_details' | 'month_closing'; id: number } | null;
   onModalHandled?: () => void;
 }
 
 export function DailyClosingSection({ userId, transactions, currentUserProfile, modalTrigger, onModalHandled }: DailyClosingSectionProps) {
   const [closings, setClosings] = useState<DailyClosing[]>([]);
   const [loading, setLoading] = useState(true);
-  const [activeEntryModal, setActiveEntryModal] = useState<'income' | 'expense' | 'cash_details' | null>(null);
+  const [activeEntryModal, setActiveEntryModal] = useState<'income' | 'expense' | 'cash_details' | 'month_closing' | null>(null);
   const [selectedDate, setSelectedDate] = useState<string>(() => {
     const today = new Date();
     return today.toISOString().split('T')[0];
   });
+  const [closingMonth, setClosingMonth] = useState<string>(() => {
+    const today = new Date();
+    return today.toISOString().slice(0, 7);
+  });
+  const [monthlyDues, setMonthlyDues] = useState<
+    Record<string, { dueAmount: number; notes?: string; discountAmount?: number; discountNotes?: string; updatedBy?: string }>
+  >({});
+  const [dueAmountInput, setDueAmountInput] = useState<string>('');
+  const [dueNotesInput, setDueNotesInput] = useState<string>('');
+  const [savingDue, setSavingDue] = useState<boolean>(false);
+  const [dueSaveSuccess, setDueSaveSuccess] = useState<boolean>(false);
+  const [discountAmountInput, setDiscountAmountInput] = useState<string>('');
+  const [discountNotesInput, setDiscountNotesInput] = useState<string>('');
+  const [savingDiscount, setSavingDiscount] = useState<boolean>(false);
+  const [discountSaveSuccess, setDiscountSaveSuccess] = useState<boolean>(false);
 
   // Opening balance inputs (States)
   const [openingCash, setOpeningCash] = useState<string>('0');
@@ -122,6 +139,9 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile, 
 
   useEffect(() => {
     if (modalTrigger) {
+      if (modalTrigger.type === 'month_closing') {
+        setClosingMonth(selectedDate.slice(0, 7));
+      }
       setActiveEntryModal(modalTrigger.type);
       setError('');
       onModalHandled?.();
@@ -149,6 +169,133 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile, 
 
     return () => unsubscribe();
   }, [userId]);
+
+  // 1B. Fetch manual monthly due & discount amounts
+  useEffect(() => {
+    const unsubscribe = onSnapshot(
+      collection(db, 'monthly_dues'),
+      (snapshot) => {
+        const duesMap: Record<
+          string,
+          { dueAmount: number; notes?: string; discountAmount?: number; discountNotes?: string; updatedBy?: string }
+        > = {};
+        snapshot.forEach((docSnap) => {
+          const data = docSnap.data() as {
+            month?: string;
+            dueAmount?: number;
+            notes?: string;
+            discountAmount?: number;
+            discountNotes?: string;
+            updatedBy?: string;
+          };
+          const key = data.month || docSnap.id;
+          duesMap[key] = {
+            dueAmount: Number(data.dueAmount) || 0,
+            notes: data.notes || '',
+            discountAmount: Number(data.discountAmount) || 0,
+            discountNotes: data.discountNotes || '',
+            updatedBy: data.updatedBy || '',
+          };
+        });
+        setMonthlyDues(duesMap);
+      },
+      (err) => {
+        console.error('Error fetching monthly dues:', err);
+      }
+    );
+
+    return () => unsubscribe();
+  }, [userId]);
+
+  useEffect(() => {
+    const saved = monthlyDues[closingMonth];
+    setDueAmountInput(saved && saved.dueAmount > 0 ? saved.dueAmount.toString() : '');
+    setDueNotesInput(saved?.notes || '');
+    setDiscountAmountInput(saved && (saved.discountAmount ?? 0) > 0 ? String(saved.discountAmount) : '');
+    setDiscountNotesInput(saved?.discountNotes || '');
+  }, [
+    closingMonth,
+    monthlyDues[closingMonth]?.dueAmount,
+    monthlyDues[closingMonth]?.notes,
+    monthlyDues[closingMonth]?.discountAmount,
+    monthlyDues[closingMonth]?.discountNotes,
+  ]);
+
+  const handleSaveMonthlyDue = async (customAmount?: number, customNotes?: string) => {
+    const targetMonth = closingMonth || selectedDate.slice(0, 7);
+    const parsedAmount =
+      typeof customAmount === 'number'
+        ? Math.max(0, customAmount)
+        : Math.max(0, parseFloat(dueAmountInput || '0') || 0);
+    const cleanNotes = (typeof customNotes === 'string' ? customNotes.trim() : dueNotesInput.trim()).slice(0, 500);
+
+    setSavingDue(true);
+    setDueSaveSuccess(false);
+    try {
+      const dueDocRef = doc(db, 'monthly_dues', targetMonth);
+      const isNew = !monthlyDues[targetMonth];
+      await setDoc(
+        dueDocRef,
+        {
+          id: targetMonth,
+          userId,
+          month: targetMonth,
+          dueAmount: parsedAmount,
+          notes: cleanNotes,
+          updatedBy: (currentUserProfile?.email || 'System Admin').slice(0, 150),
+          ...(isNew ? { createdAt: serverTimestamp() } : {}),
+          updatedAt: serverTimestamp(),
+        },
+        { merge: true }
+      );
+      setDueSaveSuccess(true);
+      setTimeout(() => setDueSaveSuccess(false), 3000);
+    } catch (err) {
+      handleFirestoreError(err, OperationType.WRITE, `monthly_dues/${targetMonth}`);
+    } finally {
+      setSavingDue(false);
+    }
+  };
+
+  const handleSaveMonthlyDiscount = async (customAmount?: number, customNotes?: string) => {
+    const targetMonth = closingMonth || selectedDate.slice(0, 7);
+    const parsedAmount =
+      typeof customAmount === 'number'
+        ? Math.max(0, customAmount)
+        : Math.max(0, parseFloat(discountAmountInput || '0') || 0);
+    const cleanNotes = (
+      typeof customNotes === 'string' ? customNotes.trim() : discountNotesInput.trim()
+    ).slice(0, 500);
+
+    setSavingDiscount(true);
+    setDiscountSaveSuccess(false);
+    try {
+      const dueDocRef = doc(db, 'monthly_dues', targetMonth);
+      const existingRecord = monthlyDues[targetMonth];
+      const isNew = !existingRecord;
+      await setDoc(
+        dueDocRef,
+        {
+          id: targetMonth,
+          userId,
+          month: targetMonth,
+          dueAmount: existingRecord?.dueAmount ?? 0,
+          discountAmount: parsedAmount,
+          discountNotes: cleanNotes,
+          updatedBy: (currentUserProfile?.email || 'System Admin').slice(0, 150),
+          ...(isNew ? { createdAt: serverTimestamp() } : {}),
+          updatedAt: serverTimestamp(),
+        },
+        { merge: true }
+      );
+      setDiscountSaveSuccess(true);
+      setTimeout(() => setDiscountSaveSuccess(false), 3000);
+    } catch (err) {
+      handleFirestoreError(err, OperationType.WRITE, `monthly_dues/${targetMonth}`);
+    } finally {
+      setSavingDiscount(false);
+    }
+  };
 
   // Isolate Daily Closing exclusively to entries created inside Daily Closing (never collect from other menus)
   const dailyClosingOnlyTransactions = React.useMemo(
@@ -218,6 +365,897 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile, 
     }
 
     return balances;
+  };
+
+  // Helper: compute category-wise income & expense breakdown for any transaction list
+  const computeCategoryBreakdown = (txList: Transaction[]) => {
+    const incomeCategoryMap: Record<string, { key: string; label: string; amount: number; count: number }> = {
+      customer_bill: { key: 'customer_bill', label: 'Customer Bill Collection', amount: 0, count: 0 },
+      reseller_bill: { key: 'reseller_bill', label: 'Reseller Bill Collection', amount: 0, count: 0 },
+      service_charge: { key: 'service_charge', label: 'Service Charge Collection', amount: 0, count: 0 },
+      other_income: { key: 'other_income', label: 'Other Income', amount: 0, count: 0 },
+    };
+
+    const expenseCategoryMap: Record<string, { key: string; label: string; amount: number; count: number }> = {};
+    Object.entries(EXPENSE_CATEGORY_LABELS).forEach(([key, meta]) => {
+      expenseCategoryMap[key] = { key, label: meta.label, amount: 0, count: 0 };
+    });
+
+    const formatFallbackCategory = (rawKey: string) =>
+      rawKey.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+
+    for (const t of txList) {
+      const amt = Number(t.amount) || 0;
+      const catKey = (t.category || (t.type === 'income' ? 'other_income' : 'other_expense')).trim();
+      if (t.type === 'income') {
+        if (!incomeCategoryMap[catKey]) {
+          incomeCategoryMap[catKey] = {
+            key: catKey,
+            label: formatFallbackCategory(catKey),
+            amount: 0,
+            count: 0,
+          };
+        }
+        incomeCategoryMap[catKey].amount += amt;
+        incomeCategoryMap[catKey].count += 1;
+      } else {
+        if (!expenseCategoryMap[catKey]) {
+          expenseCategoryMap[catKey] = {
+            key: catKey,
+            label: formatFallbackCategory(catKey),
+            amount: 0,
+            count: 0,
+          };
+        }
+        expenseCategoryMap[catKey].amount += amt;
+        expenseCategoryMap[catKey].count += 1;
+      }
+    }
+
+    return {
+      incomeCategories: Object.values(incomeCategoryMap),
+      expenseCategories: Object.values(expenseCategoryMap),
+    };
+  };
+
+  // Helper: compute Month Closing statement summary for any YYYY-MM month
+  const getMonthClosingSummary = (monthStr: string) => {
+    const safeMonth = monthStr || selectedDate.slice(0, 7);
+    const openBal = computeOpeningBalancesForDate(`${safeMonth}-01`);
+
+    const monthTxs = dailyClosingOnlyTransactions.filter(
+      (t) => t.date && t.date.startsWith(safeMonth)
+    );
+
+    const flows = {
+      cash: { income: 0, expense: 0 },
+      bkash: { income: 0, expense: 0 },
+      nagad: { income: 0, expense: 0 },
+      rocket: { income: 0, expense: 0 },
+      bank: { income: 0, expense: 0 },
+      sslcommerz: { income: 0, expense: 0 },
+    };
+
+    for (const t of monthTxs) {
+      const pm = (t.paymentMethod || 'cash').trim().toLowerCase();
+      const amt = Number(t.amount) || 0;
+      const key: keyof typeof flows =
+        pm === 'bkash' ? 'bkash' :
+        pm === 'nagad' ? 'nagad' :
+        pm === 'rocket' ? 'rocket' :
+        pm === 'bank' ? 'bank' :
+        pm === 'sslcommerz' ? 'sslcommerz' : 'cash';
+
+      if (t.type === 'income') {
+        flows[key].income += amt;
+      } else {
+        flows[key].expense += amt;
+      }
+    }
+
+    const methods = [
+      { key: 'cash', label: 'Cash', open: openBal.cash, income: flows.cash.income, expense: flows.cash.expense, close: openBal.cash + flows.cash.income - flows.cash.expense, pl: flows.cash.income - flows.cash.expense },
+      { key: 'bkash', label: 'bKash', open: openBal.bkash, income: flows.bkash.income, expense: flows.bkash.expense, close: openBal.bkash + flows.bkash.income - flows.bkash.expense, pl: flows.bkash.income - flows.bkash.expense },
+      { key: 'nagad', label: 'Nagad', open: openBal.nagad, income: flows.nagad.income, expense: flows.nagad.expense, close: openBal.nagad + flows.nagad.income - flows.nagad.expense, pl: flows.nagad.income - flows.nagad.expense },
+      { key: 'rocket', label: 'Rocket', open: openBal.rocket, income: flows.rocket.income, expense: flows.rocket.expense, close: openBal.rocket + flows.rocket.income - flows.rocket.expense, pl: flows.rocket.income - flows.rocket.expense },
+      { key: 'bank', label: 'Bank Transfer', open: openBal.bank, income: flows.bank.income, expense: flows.bank.expense, close: openBal.bank + flows.bank.income - flows.bank.expense, pl: flows.bank.income - flows.bank.expense },
+      { key: 'sslcommerz', label: 'SSL Commerz', open: openBal.sslcommerz, income: flows.sslcommerz.income, expense: flows.sslcommerz.expense, close: openBal.sslcommerz + flows.sslcommerz.income - flows.sslcommerz.expense, pl: flows.sslcommerz.income - flows.sslcommerz.expense },
+    ];
+
+    const totalOpen = methods.reduce((s, m) => s + m.open, 0);
+    const totalIncome = methods.reduce((s, m) => s + m.income, 0);
+    const totalExpense = methods.reduce((s, m) => s + m.expense, 0);
+    const totalClose = methods.reduce((s, m) => s + m.close, 0);
+    const totalPL = totalIncome - totalExpense;
+
+    const monthClosings = closings
+      .filter((c) => c.date && c.date.startsWith(safeMonth))
+      .sort((a, b) => b.date.localeCompare(a.date));
+    const closedDaysCount = monthClosings.filter((c) => c.status === 'closed').length;
+    const latestDrawerDoc = monthClosings.find((c) => c.isDrawerSubmitted || c.status === 'closed') || null;
+
+    const totalTransferKhaToNayan = monthClosings.reduce((s, c) => s + (c.transferKhaToNayan ?? 0), 0);
+    const totalTransferNayanToDhaka = monthClosings.reduce((s, c) => s + (c.transferNayanToDhaka ?? 0), 0);
+    const totalTransferDhakaToNayan = monthClosings.reduce((s, c) => s + (c.transferDhakaToNayan ?? 0), 0);
+    const totalTransferDhakaToKha = monthClosings.reduce((s, c) => s + (c.transferDhakaToKha ?? 0), 0);
+
+    const { incomeCategories, expenseCategories } = computeCategoryBreakdown(monthTxs);
+
+    const MONTH_NAMES = [
+      'January', 'February', 'March', 'April', 'May', 'June',
+      'July', 'August', 'September', 'October', 'November', 'December',
+    ];
+    const [yrStr, moStr] = safeMonth.split('-');
+    const moIdx = parseInt(moStr, 10) - 1;
+    const monthName = moIdx >= 0 && moIdx < 12 && yrStr ? `${MONTH_NAMES[moIdx]} ${yrStr}` : safeMonth;
+
+    return {
+      month: safeMonth,
+      monthName,
+      methods,
+      monthTxs,
+      incomeCategories,
+      expenseCategories,
+      incomeCount: monthTxs.filter((t) => t.type === 'income').length,
+      expenseCount: monthTxs.filter((t) => t.type === 'expense').length,
+      totalOpen,
+      totalIncome,
+      totalExpense,
+      totalClose,
+      totalPL,
+      dueAmount: monthlyDues[safeMonth]?.dueAmount ?? 0,
+      dueNotes: monthlyDues[safeMonth]?.notes || '',
+      discountAmount: monthlyDues[safeMonth]?.discountAmount ?? 0,
+      discountNotes: monthlyDues[safeMonth]?.discountNotes || '',
+      closedDaysCount,
+      latestDrawerDoc,
+      transfers: {
+        khaToNayan: totalTransferKhaToNayan,
+        nayanToDhaka: totalTransferNayanToDhaka,
+        dhakaToNayan: totalTransferDhakaToNayan,
+        dhakaToKha: totalTransferDhakaToKha,
+        total: totalTransferKhaToNayan + totalTransferNayanToDhaka + totalTransferDhakaToNayan + totalTransferDhakaToKha,
+      },
+    };
+  };
+
+  const handleDownloadMonthClosingPDF = (monthStr: string) => {
+    try {
+      const summary = getMonthClosingSummary(monthStr);
+      const doc = new jsPDF();
+
+      doc.setFontSize(18);
+      doc.setTextColor(15, 23, 42);
+      doc.text('TITAS INTERNET & ACCOUNTING', 105, 18, { align: 'center' });
+
+      doc.setFontSize(10);
+      doc.setTextColor(100, 116, 139);
+      doc.text('OFFICIAL MONTH CLOSING & FINANCIAL STATEMENT REPORT', 105, 24, { align: 'center' });
+
+      doc.setDrawColor(203, 213, 225);
+      doc.line(14, 29, 196, 29);
+
+      doc.setFontSize(9.5);
+      doc.setTextColor(51, 65, 85);
+      doc.text(`Closing Month: ${summary.month}`, 14, 36);
+      doc.text(`Closed Days: ${summary.closedDaysCount}`, 14, 42);
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(13);
+      doc.setTextColor(15, 23, 42);
+      doc.text(summary.monthName, 105, 40, { align: 'center' });
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(9.5);
+      doc.setTextColor(51, 65, 85);
+      doc.text(`Generated By: ${currentUserProfile?.email || 'System Admin'}`, 196, 36, { align: 'right' });
+      doc.text(`Generated At: ${new Date().toLocaleTimeString()} BDT`, 196, 42, { align: 'right' });
+
+      const cardsY = 48;
+      const cards = [
+        {
+          label: 'MONTH OPENING',
+          value: `${summary.totalOpen.toLocaleString()} BDT`,
+          fill: [248, 250, 252] as [number, number, number],
+          border: [226, 232, 240] as [number, number, number],
+          labelColor: [148, 163, 184] as [number, number, number],
+          valueColor: [15, 23, 42] as [number, number, number],
+        },
+        {
+          label: `MONTH INCOME (${summary.incomeCount})`,
+          value: `+${summary.totalIncome.toLocaleString()} BDT`,
+          fill: [236, 253, 245] as [number, number, number],
+          border: [167, 243, 208] as [number, number, number],
+          labelColor: [4, 120, 87] as [number, number, number],
+          valueColor: [4, 120, 87] as [number, number, number],
+        },
+        {
+          label: `MONTH EXPENSE (${summary.expenseCount})`,
+          value: `-${summary.totalExpense.toLocaleString()} BDT`,
+          fill: [255, 241, 242] as [number, number, number],
+          border: [254, 205, 211] as [number, number, number],
+          labelColor: [190, 18, 60] as [number, number, number],
+          valueColor: [190, 18, 60] as [number, number, number],
+        },
+        {
+          label: 'MONTH CLOSING',
+          value: `${summary.totalClose.toLocaleString()} BDT`,
+          fill: [240, 253, 250] as [number, number, number],
+          border: [153, 246, 228] as [number, number, number],
+          labelColor: [15, 118, 110] as [number, number, number],
+          valueColor: [19, 78, 74] as [number, number, number],
+        },
+      ];
+
+      const cardGap = 4;
+      const cardW = (182 - cardGap * 3) / 4;
+      const cardH = 22;
+
+      cards.forEach((card, idx) => {
+        const x = 14 + idx * (cardW + cardGap);
+        doc.setFillColor(...card.fill);
+        doc.setDrawColor(...card.border);
+        doc.roundedRect(x, cardsY, cardW, cardH, 3, 3, 'FD');
+
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(7);
+        doc.setTextColor(...card.labelColor);
+        doc.text(card.label, x + 4, cardsY + 7);
+
+        doc.setFontSize(10.5);
+        doc.setTextColor(...card.valueColor);
+        doc.text(card.value, x + 4, cardsY + 16);
+      });
+
+      doc.setFont('helvetica', 'normal');
+
+      const formatPL = (val: number) =>
+        val > 0 ? `+${val.toLocaleString()} BDT` : val < 0 ? `-${Math.abs(val).toLocaleString()} BDT` : '0 BDT';
+
+      autoTable(doc, {
+        startY: cardsY + cardH + 6,
+        head: [['Payment Method', 'Month Opening', 'Month Income (+)', 'Month Expense (-)', 'Month Closing', 'P/L']],
+        body: [
+          ...summary.methods.map((m) => [
+            m.label,
+            `${m.open.toLocaleString()} BDT`,
+            `+${m.income.toLocaleString()} BDT`,
+            `-${m.expense.toLocaleString()} BDT`,
+            `${m.close.toLocaleString()} BDT`,
+            formatPL(m.pl),
+          ]),
+          [
+            'TOTAL',
+            `${summary.totalOpen.toLocaleString()} BDT`,
+            `+${summary.totalIncome.toLocaleString()} BDT`,
+            `-${summary.totalExpense.toLocaleString()} BDT`,
+            `${summary.totalClose.toLocaleString()} BDT`,
+            formatPL(summary.totalPL),
+          ],
+        ],
+        theme: 'grid',
+        headStyles: { fillColor: [15, 23, 42], textColor: 255, fontSize: 8.5, fontStyle: 'bold' },
+        bodyStyles: { fontSize: 8.5, textColor: 51 },
+        columnStyles: {
+          1: { halign: 'right' },
+          2: { halign: 'right', textColor: [5, 150, 105], fontStyle: 'bold' },
+          3: { halign: 'right', textColor: [225, 29, 72], fontStyle: 'bold' },
+          4: { halign: 'right', fontStyle: 'bold' },
+          5: { halign: 'right', fontStyle: 'bold' },
+        },
+        didParseCell: (data) => {
+          if (data.section === 'body') {
+            if (data.column.index === 5) {
+              const plVal = data.row.index < summary.methods.length ? summary.methods[data.row.index].pl : summary.totalPL;
+              if (plVal > 0) data.cell.styles.textColor = [5, 150, 105];
+              else if (plVal < 0) data.cell.styles.textColor = [225, 29, 72];
+              else data.cell.styles.textColor = [100, 116, 139];
+            }
+            if (data.row.index === summary.methods.length) {
+              data.cell.styles.fontStyle = 'bold';
+              data.cell.styles.fillColor = [241, 245, 249];
+            }
+          }
+        },
+      });
+
+      let nextY = (doc as any).lastAutoTable.finalY + 8;
+
+      if (summary.latestDrawerDoc) {
+        doc.setFontSize(9.5);
+        doc.setTextColor(15, 23, 42);
+        doc.text(`Latest Cash Details (${summary.latestDrawerDoc.date}) & Monthly Transfers`, 14, nextY);
+        autoTable(doc, {
+          startY: nextY + 3,
+          head: [['Physical Cash Snapshot', 'Amount', 'Monthly Transfers Total', 'Amount']],
+          body: [
+            ['KHA Office Cash', `${(summary.latestDrawerDoc.khaOfficeCash ?? 0).toLocaleString()} BDT`, 'KHA Office to Nayan', `${summary.transfers.khaToNayan.toLocaleString()} BDT`],
+            ['Dhaka Office Cash', `${(summary.latestDrawerDoc.dhakaOfficeCash ?? 0).toLocaleString()} BDT`, 'Nayan to Dhaka office', `${summary.transfers.nayanToDhaka.toLocaleString()} BDT`],
+            ['Nayan Cash', `${(summary.latestDrawerDoc.nayanCash ?? 0).toLocaleString()} BDT`, 'Dhaka office to Nayan', `${summary.transfers.dhakaToNayan.toLocaleString()} BDT`],
+            ['Account Cash', `${(summary.latestDrawerDoc.accountCash ?? 0).toLocaleString()} BDT`, 'Dhaka to KHA Office', `${summary.transfers.dhakaToKha.toLocaleString()} BDT`],
+          ],
+          theme: 'grid',
+          headStyles: { fillColor: [71, 85, 105], textColor: 255, fontSize: 8 },
+          bodyStyles: { fontSize: 8 },
+          columnStyles: {
+            1: { halign: 'right' },
+            3: { halign: 'right' },
+          },
+        });
+        nextY = (doc as any).lastAutoTable.finalY + 8;
+      }
+
+      doc.setFontSize(9.5);
+      doc.setTextColor(4, 120, 87);
+      doc.text(`Category-Wise Income Statement (${summary.month})`, 14, nextY);
+      autoTable(doc, {
+        startY: nextY + 3,
+        head: [['Income Category', 'Entries', 'Amount (BDT)']],
+        body: [
+          ...summary.incomeCategories.map((c) => [
+            c.label,
+            c.count.toString(),
+            `+${c.amount.toLocaleString()} BDT`,
+          ]),
+          ['Total Category Income', summary.incomeCount.toString(), `+${summary.totalIncome.toLocaleString()} BDT`],
+        ],
+        theme: 'grid',
+        headStyles: { fillColor: [5, 150, 105], textColor: 255, fontSize: 8.5, fontStyle: 'bold' },
+        bodyStyles: { fontSize: 8.5, textColor: 51 },
+        columnStyles: {
+          1: { halign: 'center' },
+          2: { halign: 'right', textColor: [5, 150, 105], fontStyle: 'bold' },
+        },
+        didParseCell: (data) => {
+          if (data.section === 'body' && data.row.index === summary.incomeCategories.length) {
+            data.cell.styles.fontStyle = 'bold';
+            data.cell.styles.fillColor = [236, 253, 245];
+          }
+        },
+      });
+
+      const afterIncomeCatY = (doc as any).lastAutoTable.finalY + 8;
+      doc.setFontSize(9.5);
+      doc.setTextColor(190, 18, 60);
+      doc.text(`Category-Wise Expense Statement (${summary.month})`, 14, afterIncomeCatY);
+      autoTable(doc, {
+        startY: afterIncomeCatY + 3,
+        head: [['Expense Category', 'Entries', 'Amount (BDT)']],
+        body: [
+          ...summary.expenseCategories.map((c) => [
+            c.label,
+            c.count.toString(),
+            `-${c.amount.toLocaleString()} BDT`,
+          ]),
+          ['Total Category Expense', summary.expenseCount.toString(), `-${summary.totalExpense.toLocaleString()} BDT`],
+        ],
+        theme: 'grid',
+        headStyles: { fillColor: [225, 29, 72], textColor: 255, fontSize: 8.5, fontStyle: 'bold' },
+        bodyStyles: { fontSize: 8.5, textColor: 51 },
+        columnStyles: {
+          1: { halign: 'center' },
+          2: { halign: 'right', textColor: [225, 29, 72], fontStyle: 'bold' },
+        },
+        didParseCell: (data) => {
+          if (data.section === 'body' && data.row.index === summary.expenseCategories.length) {
+            data.cell.styles.fontStyle = 'bold';
+            data.cell.styles.fillColor = [255, 241, 242];
+          }
+        },
+      });
+
+      const afterExpenseCatY = (doc as any).lastAutoTable.finalY + 8;
+      const plLabel = summary.totalPL > 0 ? 'NET PROFIT' : summary.totalPL < 0 ? 'NET LOSS' : 'BREAK-EVEN';
+      const plMargin = summary.totalIncome > 0 ? ((summary.totalPL / summary.totalIncome) * 100).toFixed(1) : '0.0';
+      doc.setFontSize(9.5);
+      doc.setTextColor(15, 118, 110);
+      doc.text(`Profit & Loss (P/L) Statement (${summary.month})`, 14, afterExpenseCatY);
+      autoTable(doc, {
+        startY: afterExpenseCatY + 3,
+        head: [['P/L Statement Item', 'Details', 'Amount (BDT)']],
+        body: [
+          ['Total Monthly Income (+)', `${summary.incomeCount} entries`, `+${summary.totalIncome.toLocaleString()} BDT`],
+          ['Total Monthly Expense (-)', `${summary.expenseCount} entries`, `-${summary.totalExpense.toLocaleString()} BDT`],
+          [`Net Profit / Loss (${plLabel})`, `Margin: ${plMargin}%`, formatPL(summary.totalPL)],
+        ],
+        theme: 'grid',
+        headStyles: { fillColor: [15, 118, 110], textColor: 255, fontSize: 8.5, fontStyle: 'bold' },
+        bodyStyles: { fontSize: 8.5, textColor: 51 },
+        columnStyles: {
+          1: { halign: 'center' },
+          2: { halign: 'right', fontStyle: 'bold' },
+        },
+        didParseCell: (data) => {
+          if (data.section === 'body') {
+            if (data.row.index === 0 && data.column.index === 2) data.cell.styles.textColor = [5, 150, 105];
+            if (data.row.index === 1 && data.column.index === 2) data.cell.styles.textColor = [225, 29, 72];
+            if (data.row.index === 2) {
+              data.cell.styles.fontStyle = 'bold';
+              data.cell.styles.fillColor = summary.totalPL >= 0 ? [240, 253, 250] : [255, 241, 242];
+              if (data.column.index === 2) {
+                data.cell.styles.textColor = summary.totalPL > 0 ? [4, 120, 87] : summary.totalPL < 0 ? [190, 18, 60] : [51, 65, 85];
+              }
+            }
+          }
+        },
+      });
+
+      const afterPLY = (doc as any).lastAutoTable.finalY + 8;
+      doc.setFontSize(9.5);
+      doc.setTextColor(180, 83, 9);
+      doc.text(`Due Amount (${summary.month})`, 14, afterPLY);
+      autoTable(doc, {
+        startY: afterPLY + 3,
+        head: [['Due Item', 'Note / Details', 'Amount (BDT)']],
+        body: [
+          ['Manual Due Amount', summary.dueNotes ? summary.dueNotes : 'Monthly Due', `${summary.dueAmount.toLocaleString()} BDT`],
+        ],
+        theme: 'grid',
+        headStyles: { fillColor: [180, 83, 9], textColor: 255, fontSize: 8.5, fontStyle: 'bold' },
+        bodyStyles: { fontSize: 8.5, textColor: 51 },
+        columnStyles: {
+          1: { halign: 'center' },
+          2: { halign: 'right', fontStyle: 'bold', textColor: [180, 83, 9] },
+        },
+      });
+
+      const afterDueY = (doc as any).lastAutoTable.finalY + 8;
+      doc.setFontSize(9.5);
+      doc.setTextColor(109, 40, 217);
+      doc.text(`Discount (${summary.month})`, 14, afterDueY);
+      autoTable(doc, {
+        startY: afterDueY + 3,
+        head: [['Discount Item', 'Note / Details', 'Amount (BDT)']],
+        body: [
+          ['Manual Discount', summary.discountNotes ? summary.discountNotes : 'Monthly Discount', `${summary.discountAmount.toLocaleString()} BDT`],
+        ],
+        theme: 'grid',
+        headStyles: { fillColor: [109, 40, 217], textColor: 255, fontSize: 8.5, fontStyle: 'bold' },
+        bodyStyles: { fontSize: 8.5, textColor: 51 },
+        columnStyles: {
+          1: { halign: 'center' },
+          2: { halign: 'right', fontStyle: 'bold', textColor: [109, 40, 217] },
+        },
+      });
+
+      doc.save(`Month_Closing_Report_${summary.month}.pdf`);
+    } catch (err) {
+      console.error('Failed to generate Month Closing PDF:', err);
+    }
+  };
+
+  const handleDownloadMonthClosingExcel = (monthStr: string) => {
+    try {
+      const summary = getMonthClosingSummary(monthStr);
+      const latestCashTotal = summary.latestDrawerDoc
+        ? (summary.latestDrawerDoc.khaOfficeCash ?? 0) +
+          (summary.latestDrawerDoc.dhakaOfficeCash ?? 0) +
+          (summary.latestDrawerDoc.nayanCash ?? 0) +
+          (summary.latestDrawerDoc.accountCash ?? 0)
+        : 0;
+
+      const summaryRows: (string | number)[][] = [
+        ['TITAS INTERNET & ACCOUNTING'],
+        ['OFFICIAL MONTH CLOSING & FINANCIAL STATEMENT REPORT'],
+        ['Closing Month', `${summary.monthName} (${summary.month})`, 'Closed Days', summary.closedDaysCount, 'Generated By', currentUserProfile?.email || 'System Admin'],
+        [],
+        ['MONTH SUMMARY', 'AMOUNT (BDT)', 'ENTRIES'],
+        ['Month Opening', summary.totalOpen, ''],
+        ['Month Income (+)', summary.totalIncome, summary.incomeCount],
+        ['Month Expense (-)', summary.totalExpense, summary.expenseCount],
+        ['Month Closing', summary.totalClose, ''],
+        [],
+        ['PAYMENT METHOD MONTHLY BREAKDOWN'],
+        ['Payment Method', 'Opening (BDT)', 'Income (+) (BDT)', 'Expense (-) (BDT)', 'Closing (BDT)', 'P/L (BDT)'],
+        ...summary.methods.map((m) => [m.label, m.open, m.income, m.expense, m.close, m.pl]),
+        ['TOTAL', summary.totalOpen, summary.totalIncome, summary.totalExpense, summary.totalClose, summary.totalPL],
+        [],
+        ['LATEST PHYSICAL CASH', summary.latestDrawerDoc ? summary.latestDrawerDoc.date : 'No Entry', '', 'MONTHLY CASH TRANSFERS', summary.month],
+        ['KHA Office Cash', summary.latestDrawerDoc?.khaOfficeCash ?? 0, '', 'KHA Office to Nayan', summary.transfers.khaToNayan],
+        ['Dhaka Office Cash', summary.latestDrawerDoc?.dhakaOfficeCash ?? 0, '', 'Nayan to Dhaka office', summary.transfers.nayanToDhaka],
+        ['Nayan Cash', summary.latestDrawerDoc?.nayanCash ?? 0, '', 'Dhaka office to Nayan', summary.transfers.dhakaToNayan],
+        ['Account Cash', summary.latestDrawerDoc?.accountCash ?? 0, '', 'Dhaka office to KHA Office', summary.transfers.dhakaToKha],
+        ['Total Physical Cash', latestCashTotal, '', 'Total Transfers', summary.transfers.total],
+        [],
+        ['CATEGORY-WISE INCOME STATEMENT', 'ENTRIES', 'AMOUNT (BDT)'],
+        ...summary.incomeCategories.map((c) => [c.label, c.count, c.amount]),
+        ['Total Category Income', summary.incomeCount, summary.totalIncome],
+        [],
+        ['CATEGORY-WISE EXPENSE STATEMENT', 'ENTRIES', 'AMOUNT (BDT)'],
+        ...summary.expenseCategories.map((c) => [c.label, c.count, c.amount]),
+        ['Total Category Expense', summary.expenseCount, summary.totalExpense],
+        [],
+        ['P/L STATEMENT', 'STATUS / DETAILS', 'AMOUNT (BDT)'],
+        ['Total Monthly Income (+)', `${summary.incomeCount} entries`, summary.totalIncome],
+        ['Total Monthly Expense (-)', `${summary.expenseCount} entries`, summary.totalExpense],
+        [
+          'Net Profit / Loss (P/L)',
+          summary.totalPL > 0 ? 'PROFIT' : summary.totalPL < 0 ? 'LOSS' : 'BREAK-EVEN',
+          summary.totalPL,
+        ],
+        [],
+        ['DUE AMOUNT', 'NOTE / DETAILS', 'AMOUNT (BDT)'],
+        ['Manual Due Amount', summary.dueNotes || 'Monthly Due', summary.dueAmount],
+        [],
+        ['DISCOUNT', 'NOTE / DETAILS', 'AMOUNT (BDT)'],
+        ['Manual Discount', summary.discountNotes || 'Monthly Discount', summary.discountAmount],
+      ];
+
+      const wb = XLSX.utils.book_new();
+      const wsSummary = XLSX.utils.aoa_to_sheet(summaryRows);
+      wsSummary['!cols'] = [
+        { wch: 24 },
+        { wch: 18 },
+        { wch: 18 },
+        { wch: 26 },
+        { wch: 18 },
+        { wch: 26 },
+      ];
+      XLSX.utils.book_append_sheet(wb, wsSummary, 'Month Closing Summary');
+
+      const sortedTxs = [...summary.monthTxs].sort((a, b) => (a.date || '').localeCompare(b.date || ''));
+      const txRows: (string | number)[][] = [
+        ['SL', 'Date', 'Type', 'Category', 'Payment Method', 'Amount (BDT)', 'Notes'],
+        ...sortedTxs.map((tx, idx) => [
+          idx + 1,
+          tx.date || '',
+          (tx.type || '').toUpperCase(),
+          getCategoryLabel(tx),
+          (tx.paymentMethod || 'cash').toUpperCase(),
+          Number(tx.amount) || 0,
+          tx.notes || '',
+        ]),
+      ];
+      const wsTx = XLSX.utils.aoa_to_sheet(txRows);
+      wsTx['!cols'] = [
+        { wch: 6 },
+        { wch: 14 },
+        { wch: 12 },
+        { wch: 24 },
+        { wch: 16 },
+        { wch: 16 },
+        { wch: 40 },
+      ];
+      XLSX.utils.book_append_sheet(wb, wsTx, 'Monthly Transactions');
+
+      XLSX.writeFile(wb, `Month_Closing_Report_${summary.month}.xlsx`);
+    } catch (err) {
+      console.error('Failed to generate Month Closing Excel:', err);
+    }
+  };
+
+  const handlePrintMonthClosingStatement = (monthStr: string) => {
+    try {
+      const summary = getMonthClosingSummary(monthStr);
+      const escapeHtml = (val: string) =>
+        val
+          .replace(/&/g, '&amp;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;')
+          .replace(/"/g, '&quot;')
+          .replace(/'/g, '&#39;');
+      const latestCashTotal = summary.latestDrawerDoc
+        ? (summary.latestDrawerDoc.khaOfficeCash ?? 0) +
+          (summary.latestDrawerDoc.dhakaOfficeCash ?? 0) +
+          (summary.latestDrawerDoc.nayanCash ?? 0) +
+          (summary.latestDrawerDoc.accountCash ?? 0)
+        : 0;
+
+      const htmlContent = `
+        <!DOCTYPE html>
+        <html>
+          <head>
+            <meta charset="utf-8" />
+            <title>Month_Closing_Statement_${summary.month}</title>
+            <style>
+              * { box-sizing: border-box; margin: 0; padding: 0; }
+              body {
+                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+                color: #0f172a;
+                background: #f8fafc;
+                padding: 20px;
+                -webkit-print-color-adjust: exact !important;
+                print-color-adjust: exact !important;
+              }
+              .page {
+                max-width: 820px;
+                margin: 0 auto;
+                background: #ffffff;
+                padding: 28px;
+                border-radius: 14px;
+                border: 1px solid #e2e8f0;
+              }
+              .print-toolbar {
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                background: #f0fdfa;
+                border: 1px solid #99f6e4;
+                padding: 12px 16px;
+                border-radius: 10px;
+                margin-bottom: 20px;
+              }
+              .print-toolbar span { font-size: 12px; font-weight: 700; color: #115e59; }
+              .btn-group { display: flex; gap: 8px; }
+              .btn-print {
+                background: #0d9488; color: #ffffff; border: none; border-radius: 8px;
+                padding: 8px 14px; font-size: 12px; font-weight: 700; cursor: pointer;
+              }
+              .btn-close {
+                background: #e2e8f0; color: #334155; border: none; border-radius: 8px;
+                padding: 8px 14px; font-size: 12px; font-weight: 700; cursor: pointer;
+              }
+              @media print {
+                .no-print { display: none !important; }
+                html, body { background: #ffffff; padding: 0; margin: 0; }
+                .page { border: none; padding: 0; max-width: 100%; border-radius: 0; box-shadow: none; }
+                .section, .cards, .grid-2, .sigs { break-inside: avoid; page-break-inside: avoid; }
+                @page { size: A4 portrait; margin: 8mm; }
+              }
+              .header { text-align: center; border-bottom: 1.5px dashed #cbd5e1; padding-bottom: 8px; margin-bottom: 8px; }
+              .header h1 { font-size: 16px; font-weight: 800; letter-spacing: 0.6px; text-transform: uppercase; color: #0f172a; }
+              .header p { font-size: 9px; font-weight: 600; color: #64748b; letter-spacing: 1.1px; text-transform: uppercase; margin-top: 2px; }
+              .meta { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 12px; font-size: 9.5px; color: #475569; margin-bottom: 10px; line-height: 1.45; }
+              .meta strong { color: #0f172a; }
+              .cards { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-bottom: 10px; }
+              .card { border-radius: 8px; padding: 8px 10px; border: 1px solid #e2e8f0; }
+              .card-label { font-size: 8px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.4px; display: block; }
+              .card-val { font-size: 12.5px; font-weight: 800; margin-top: 3px; display: block; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+              .card-open { background: #f8fafc; border-color: #e2e8f0; }
+              .card-open .card-label { color: #94a3b8; }
+              .card-open .card-val { color: #0f172a; }
+              .card-inc { background: #ecfdf5; border-color: #a7f3d0; }
+              .card-inc .card-label, .card-inc .card-val { color: #047857; }
+              .card-exp { background: #fff1f2; border-color: #fecdd3; }
+              .card-exp .card-label, .card-exp .card-val { color: #be123c; }
+              .card-close { background: #f0fdfa; border-color: #99f6e4; }
+              .card-close .card-label { color: #0f766e; }
+              .card-close .card-val { color: #134e4a; }
+              .section { border: 1px solid #e2e8f0; border-radius: 10px; padding: 9px 12px; margin-bottom: 10px; background: #ffffff; }
+              .section-title { font-size: 9px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.5px; color: #334155; border-bottom: 1px solid #e2e8f0; padding-bottom: 5px; margin-bottom: 6px; display: flex; justify-content: space-between; align-items: center; }
+              table { width: 100%; border-collapse: collapse; font-size: 10px; }
+              th { text-align: left; font-size: 8px; text-transform: uppercase; color: #64748b; padding: 4px 5px; border-bottom: 1px solid #cbd5e1; }
+              td { padding: 4px 5px; border-bottom: 1px solid #f1f5f9; }
+              .num { text-align: right; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+              .inc { color: #059669; font-weight: 700; }
+              .exp { color: #e11d48; font-weight: 700; }
+              .bold { font-weight: 800; color: #0f172a; }
+              .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 10px; }
+              .cat-grid-2 { display: grid; grid-template-columns: 1fr 1fr; column-gap: 20px; }
+              .row-item { display: flex; justify-content: space-between; font-size: 9.5px; padding: 2.5px 0; border-bottom: 1px dashed #e2e8f0; gap: 8px; }
+              .row-total { display: flex; justify-content: space-between; font-size: 10px; font-weight: 800; padding-top: 5px; margin-top: 4px; border-top: 1px solid #e2e8f0; color: #1e1b4b; }
+              .sigs { display: flex; justify-content: space-between; margin-top: 22px; padding-top: 8px; }
+              .sig-box { width: 160px; text-align: center; }
+              .sig-line { border-top: 1px solid #94a3b8; padding-top: 4px; font-size: 8.5px; font-weight: 700; text-transform: uppercase; color: #64748b; }
+            </style>
+          </head>
+          <body>
+            <div class="page">
+              <div class="print-toolbar no-print">
+                <span>Month Closing Statement Print View (${summary.month})</span>
+                <div class="btn-group">
+                  <button type="button" class="btn-print" onclick="window.print()">Print Now</button>
+                  <button type="button" class="btn-close" onclick="window.close()">Close</button>
+                </div>
+              </div>
+              <div class="header">
+                <h1>Titas Internet &amp; Accounting</h1>
+                <p>Official Month Closing &amp; Financial Statement Report</p>
+              </div>
+              <div class="meta">
+                <div>
+                  <div><strong>Closing Month:</strong> ${summary.month}</div>
+                  <div><strong>Closed Days:</strong> ${summary.closedDaysCount}</div>
+                </div>
+                <div style="text-align: center; padding: 3px 14px; background: #f0fdfa; border: 1px solid #99f6e4; border-radius: 6px;">
+                  <div style="font-size: 13px; font-weight: 800; color: #0f172a; letter-spacing: 0.4px; text-transform: uppercase;">${escapeHtml(summary.monthName)}</div>
+                </div>
+                <div style="text-align: right;">
+                  <div><strong>Generated By:</strong> ${currentUserProfile?.email || 'System Admin'}</div>
+                  <div><strong>Generated At:</strong> ${new Date().toLocaleTimeString()} BDT</div>
+                </div>
+              </div>
+
+              <div class="cards">
+                <div class="card card-open">
+                  <span class="card-label">Month Opening</span>
+                  <span class="card-val">${summary.totalOpen.toLocaleString()} BDT</span>
+                </div>
+                <div class="card card-inc">
+                  <span class="card-label">Month Income (${summary.incomeCount})</span>
+                  <span class="card-val">+${summary.totalIncome.toLocaleString()} BDT</span>
+                </div>
+                <div class="card card-exp">
+                  <span class="card-label">Month Expense (${summary.expenseCount})</span>
+                  <span class="card-val">-${summary.totalExpense.toLocaleString()} BDT</span>
+                </div>
+                <div class="card card-close">
+                  <span class="card-label">Month Closing</span>
+                  <span class="card-val">${summary.totalClose.toLocaleString()} BDT</span>
+                </div>
+              </div>
+
+              <div style="display: grid; grid-template-columns: 1.75fr 1fr; gap: 10px; margin-bottom: 10px; align-items: stretch;">
+                <div class="section" style="margin-bottom: 0; padding: 9px 10px;">
+                  <div class="section-title">
+                    <span>Payment Method Breakdown (${summary.month})</span>
+                    <span>BDT</span>
+                  </div>
+                  <table style="font-size: 9px;">
+                    <thead>
+                      <tr>
+                        <th style="padding: 3.5px 3px;">Method</th>
+                        <th class="num" style="padding: 3.5px 3px;">Open</th>
+                        <th class="num" style="padding: 3.5px 3px;">Income</th>
+                        <th class="num" style="padding: 3.5px 3px;">Expense</th>
+                        <th class="num" style="padding: 3.5px 3px;">Close</th>
+                        <th class="num" style="padding: 3.5px 3px;">P/L</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      ${summary.methods.map((m) => {
+                        const plText = m.pl > 0 ? `+${m.pl.toLocaleString()}` : m.pl < 0 ? `-${Math.abs(m.pl).toLocaleString()}` : '0';
+                        const plCls = m.pl > 0 ? 'inc' : m.pl < 0 ? 'exp' : 'bold';
+                        return `
+                        <tr>
+                          <td class="bold" style="padding: 3.5px 3px; white-space: nowrap;">${m.label}</td>
+                          <td class="num" style="padding: 3.5px 3px; white-space: nowrap;">${m.open.toLocaleString()}</td>
+                          <td class="num inc" style="padding: 3.5px 3px; white-space: nowrap;">+${m.income.toLocaleString()}</td>
+                          <td class="num exp" style="padding: 3.5px 3px; white-space: nowrap;">-${m.expense.toLocaleString()}</td>
+                          <td class="num bold" style="padding: 3.5px 3px; white-space: nowrap;">${m.close.toLocaleString()}</td>
+                          <td class="num ${plCls}" style="padding: 3.5px 3px; white-space: nowrap;">${plText}</td>
+                        </tr>
+                      `;
+                      }).join('')}
+                      <tr style="background: #f8fafc;">
+                        <td class="bold" style="padding: 3.5px 3px;">Total</td>
+                        <td class="num bold" style="padding: 3.5px 3px;">${summary.totalOpen.toLocaleString()}</td>
+                        <td class="num inc" style="padding: 3.5px 3px;">+${summary.totalIncome.toLocaleString()}</td>
+                        <td class="num exp" style="padding: 3.5px 3px;">-${summary.totalExpense.toLocaleString()}</td>
+                        <td class="num bold" style="padding: 3.5px 3px;">${summary.totalClose.toLocaleString()}</td>
+                        <td class="num ${summary.totalPL > 0 ? 'inc' : summary.totalPL < 0 ? 'exp' : 'bold'}" style="padding: 3.5px 3px;">${summary.totalPL > 0 ? `+${summary.totalPL.toLocaleString()}` : summary.totalPL < 0 ? `-${Math.abs(summary.totalPL).toLocaleString()}` : '0'}</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+
+                <div style="display: flex; flex-direction: column; gap: 6px; justify-content: space-between;">
+                  <div class="section" style="margin-bottom: 0; padding: 7px 10px; flex: 1; display: flex; flex-direction: column; justify-content: space-between; background: ${summary.totalPL > 0 ? '#f0fdfa' : summary.totalPL < 0 ? '#fff1f2' : '#f8fafc'}; border-color: ${summary.totalPL > 0 ? '#99f6e4' : summary.totalPL < 0 ? '#fecdd3' : '#e2e8f0'};">
+                    <div>
+                      <div class="section-title" style="margin-bottom: 4px; padding-bottom: 4px;">
+                        <span style="color: ${summary.totalPL > 0 ? '#0f766e' : summary.totalPL < 0 ? '#be123c' : '#334155'};">P/L Statement (${summary.month})</span>
+                        <span style="color: ${summary.totalPL > 0 ? '#047857' : summary.totalPL < 0 ? '#be123c' : '#475569'};">
+                          ${summary.totalPL > 0 ? 'PROFIT' : summary.totalPL < 0 ? 'LOSS' : 'EVEN'}
+                        </span>
+                      </div>
+                      <div class="row-item">
+                        <span>Income (${summary.incomeCount})</span>
+                        <span class="inc">+${summary.totalIncome.toLocaleString()} BDT</span>
+                      </div>
+                      <div class="row-item">
+                        <span>Expense (${summary.expenseCount})</span>
+                        <span class="exp">-${summary.totalExpense.toLocaleString()} BDT</span>
+                      </div>
+                      <div class="row-item" style="border-bottom: none;">
+                        <span>Profit Margin</span>
+                        <span class="bold">${summary.totalIncome > 0 ? ((summary.totalPL / summary.totalIncome) * 100).toFixed(1) : '0.0'}%</span>
+                      </div>
+                    </div>
+                    <div class="row-total" style="margin-top: 4px; padding-top: 4px; border-top-color: ${summary.totalPL > 0 ? '#99f6e4' : summary.totalPL < 0 ? '#fecdd3' : '#cbd5e1'}; color: ${summary.totalPL > 0 ? '#047857' : summary.totalPL < 0 ? '#be123c' : '#0f172a'};">
+                      <span>Net P/L</span>
+                      <span>${summary.totalPL > 0 ? `+${summary.totalPL.toLocaleString()} BDT` : summary.totalPL < 0 ? `-${Math.abs(summary.totalPL).toLocaleString()} BDT` : '0 BDT'}</span>
+                    </div>
+                  </div>
+
+                  <div class="section" style="margin-bottom: 0; padding: 6px 10px; background: #fffbeb; border-color: #fde68a;">
+                    <div class="section-title" style="margin-bottom: 3px; padding-bottom: 3px; border-bottom-color: #fde68a;">
+                      <span style="color: #92400e;">Due Amount</span>
+                      <span style="color: #b45309;">${summary.month}</span>
+                    </div>
+                    <div style="display: flex; justify-content: space-between; align-items: center; font-size: 9.5px; color: #78350f;">
+                      <span>Total Due</span>
+                      <span class="bold" style="color: #b45309; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;">${summary.dueAmount.toLocaleString()} BDT</span>
+                    </div>
+                    ${summary.dueNotes ? `<div style="margin-top: 2px; font-size: 8.5px; color: #78350f;"><strong>Note:</strong> ${escapeHtml(summary.dueNotes)}</div>` : ''}
+                  </div>
+
+                  <div class="section" style="margin-bottom: 0; padding: 6px 10px; background: #f5f3ff; border-color: #ddd6fe;">
+                    <div class="section-title" style="margin-bottom: 3px; padding-bottom: 3px; border-bottom-color: #ddd6fe;">
+                      <span style="color: #5b21b6;">Discount</span>
+                      <span style="color: #6d28d9;">${summary.month}</span>
+                    </div>
+                    <div style="display: flex; justify-content: space-between; align-items: center; font-size: 9.5px; color: #4c1d95;">
+                      <span>Total Discount</span>
+                      <span class="bold" style="color: #6d28d9; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;">${summary.discountAmount.toLocaleString()} BDT</span>
+                    </div>
+                    ${summary.discountNotes ? `<div style="margin-top: 2px; font-size: 8.5px; color: #4c1d95;"><strong>Note:</strong> ${escapeHtml(summary.discountNotes)}</div>` : ''}
+                  </div>
+                </div>
+              </div>
+
+              <div class="grid-2">
+                <div class="section" style="margin-bottom: 0;">
+                  <div class="section-title">
+                    <span>Latest Physical Cash</span>
+                    <span>${summary.latestDrawerDoc ? summary.latestDrawerDoc.date : 'No Entry'}</span>
+                  </div>
+                  <div class="row-item"><span>KHA Office Cash</span><span class="bold">${(summary.latestDrawerDoc?.khaOfficeCash ?? 0).toLocaleString()} BDT</span></div>
+                  <div class="row-item"><span>Dhaka Office Cash</span><span class="bold">${(summary.latestDrawerDoc?.dhakaOfficeCash ?? 0).toLocaleString()} BDT</span></div>
+                  <div class="row-item"><span>Nayan Cash</span><span class="bold">${(summary.latestDrawerDoc?.nayanCash ?? 0).toLocaleString()} BDT</span></div>
+                  <div class="row-item"><span>Account Cash</span><span class="bold">${(summary.latestDrawerDoc?.accountCash ?? 0).toLocaleString()} BDT</span></div>
+                  <div class="row-total"><span>Total Physical Cash</span><span>${latestCashTotal.toLocaleString()} BDT</span></div>
+                </div>
+
+                <div class="section" style="margin-bottom: 0;">
+                  <div class="section-title">
+                    <span>Monthly Cash Transfers</span>
+                    <span>${summary.month}</span>
+                  </div>
+                  <div class="row-item"><span>KHA Office to Nayan</span><span class="bold">${summary.transfers.khaToNayan.toLocaleString()} BDT</span></div>
+                  <div class="row-item"><span>Nayan to Dhaka office</span><span class="bold">${summary.transfers.nayanToDhaka.toLocaleString()} BDT</span></div>
+                  <div class="row-item"><span>Dhaka office to Nayan</span><span class="bold">${summary.transfers.dhakaToNayan.toLocaleString()} BDT</span></div>
+                  <div class="row-item"><span>Dhaka office to KHA Office</span><span class="bold">${summary.transfers.dhakaToKha.toLocaleString()} BDT</span></div>
+                  <div class="row-total"><span>Total Transfers</span><span>${summary.transfers.total.toLocaleString()} BDT</span></div>
+                </div>
+              </div>
+
+              <div class="section">
+                <div class="section-title">
+                  <span style="color: #047857;">Category-Wise Income Statement (${summary.month})</span>
+                  <span style="color: #047857;">Total: +${summary.totalIncome.toLocaleString()} BDT</span>
+                </div>
+                <div class="cat-grid-2">
+                  ${summary.incomeCategories.map((c) => `
+                    <div class="row-item">
+                      <span>${escapeHtml(c.label)}${c.count > 0 ? ` (${c.count})` : ''}</span>
+                      <span class="${c.amount > 0 ? 'inc' : 'bold'}">+${c.amount.toLocaleString()} BDT</span>
+                    </div>
+                  `).join('')}
+                </div>
+              </div>
+
+              <div class="section" style="margin-bottom: 0;">
+                <div class="section-title">
+                  <span style="color: #be123c;">Category-Wise Expense Statement (${summary.month})</span>
+                  <span style="color: #be123c;">Total: -${summary.totalExpense.toLocaleString()} BDT</span>
+                </div>
+                <div class="cat-grid-2">
+                  ${summary.expenseCategories.map((c) => `
+                    <div class="row-item">
+                      <span>${escapeHtml(c.label)}${c.count > 0 ? ` (${c.count})` : ''}</span>
+                      <span class="${c.amount > 0 ? 'exp' : 'bold'}">-${c.amount.toLocaleString()} BDT</span>
+                    </div>
+                  `).join('')}
+                </div>
+              </div>
+
+              <div class="sigs">
+                <div class="sig-box"><div class="sig-line">Prepared By</div></div>
+                <div class="sig-box"><div class="sig-line">Approved By</div></div>
+              </div>
+            </div>
+            <script>
+              window.onload = function() {
+                setTimeout(function() {
+                  window.print();
+                }, 250);
+              };
+            </script>
+          </body>
+        </html>
+      `;
+
+      const printWindow = window.open('', '_blank');
+      if (printWindow) {
+        printWindow.document.open();
+        printWindow.document.write(htmlContent);
+        printWindow.document.close();
+        printWindow.focus();
+      } else {
+        window.print();
+      }
+    } catch (err) {
+      console.error('Failed to print Month Closing statement:', err);
+      window.print();
+    }
   };
 
   // 2A. Sync Opening Balances automatically for selectedDate
@@ -1585,6 +2623,89 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile, 
 
       nextStartY += 38;
 
+      // Category-Wise Income & Expense Statements in Daily Closing PDF
+      const { incomeCategories: pdfIncomeCats, expenseCategories: pdfExpenseCats } = computeCategoryBreakdown(previewTxs);
+      const pdfIncomeTotal = pdfIncomeCats.reduce((sum, c) => sum + c.amount, 0);
+      const pdfExpenseTotal = pdfExpenseCats.reduce((sum, c) => sum + c.amount, 0);
+
+      if (nextStartY + 35 > 280) {
+        doc.addPage();
+        nextStartY = 20;
+      }
+
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(9.5);
+      doc.setTextColor(4, 120, 87);
+      doc.text(`Category-Wise Income Statement (${dc.date})`, 14, nextStartY);
+      doc.text(`Total: +${pdfIncomeTotal.toLocaleString()} BDT`, 196, nextStartY, { align: 'right' });
+
+      const pdfIncomePairs: (string | number)[][] = [];
+      for (let i = 0; i < pdfIncomeCats.length; i += 2) {
+        const left = pdfIncomeCats[i];
+        const right = pdfIncomeCats[i + 1];
+        pdfIncomePairs.push([
+          `${left.label}${left.count > 0 ? ` (${left.count})` : ''}`,
+          `+${left.amount.toLocaleString()} BDT`,
+          right ? `${right.label}${right.count > 0 ? ` (${right.count})` : ''}` : '',
+          right ? `+${right.amount.toLocaleString()} BDT` : '',
+        ]);
+      }
+
+      autoTable(doc, {
+        startY: nextStartY + 3,
+        body: pdfIncomePairs,
+        theme: 'plain',
+        styles: { font: 'helvetica', fontSize: 8, cellPadding: 2, textColor: [51, 65, 85] },
+        columnStyles: {
+          0: { cellWidth: 62 },
+          1: { halign: 'right', cellWidth: 29, fontStyle: 'bold', textColor: [5, 150, 105] },
+          2: { cellWidth: 62 },
+          3: { halign: 'right', cellWidth: 29, fontStyle: 'bold', textColor: [5, 150, 105] },
+        },
+        margin: { left: 14, right: 14 },
+      });
+
+      nextStartY = (doc as any).lastAutoTable.finalY + 8;
+
+      if (nextStartY + 45 > 280) {
+        doc.addPage();
+        nextStartY = 20;
+      }
+
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(9.5);
+      doc.setTextColor(190, 18, 60);
+      doc.text(`Category-Wise Expense Statement (${dc.date})`, 14, nextStartY);
+      doc.text(`Total: -${pdfExpenseTotal.toLocaleString()} BDT`, 196, nextStartY, { align: 'right' });
+
+      const pdfExpensePairs: (string | number)[][] = [];
+      for (let i = 0; i < pdfExpenseCats.length; i += 2) {
+        const left = pdfExpenseCats[i];
+        const right = pdfExpenseCats[i + 1];
+        pdfExpensePairs.push([
+          `${left.label}${left.count > 0 ? ` (${left.count})` : ''}`,
+          `-${left.amount.toLocaleString()} BDT`,
+          right ? `${right.label}${right.count > 0 ? ` (${right.count})` : ''}` : '',
+          right ? `-${right.amount.toLocaleString()} BDT` : '',
+        ]);
+      }
+
+      autoTable(doc, {
+        startY: nextStartY + 3,
+        body: pdfExpensePairs,
+        theme: 'plain',
+        styles: { font: 'helvetica', fontSize: 8, cellPadding: 2, textColor: [51, 65, 85] },
+        columnStyles: {
+          0: { cellWidth: 62 },
+          1: { halign: 'right', cellWidth: 29, fontStyle: 'bold', textColor: [225, 29, 72] },
+          2: { cellWidth: 62 },
+          3: { halign: 'right', cellWidth: 29, fontStyle: 'bold', textColor: [225, 29, 72] },
+        },
+        margin: { left: 14, right: 14 },
+      });
+
+      nextStartY = (doc as any).lastAutoTable.finalY + 10;
+
       // Notes / Comments
       if (dc.notes) {
         if (nextStartY + 16 > 280) {
@@ -1627,6 +2748,426 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile, 
     } catch (err) {
       console.error('Failed to generate PDF:', err);
       alert('Failed to generate PDF report. Please try again.');
+    }
+  };
+
+  const handleOpenClosingPrintView = (dc: DailyClosing) => {
+    try {
+      const escapeHtml = (val: string) =>
+        val
+          .replace(/&/g, '&amp;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;')
+          .replace(/"/g, '&quot;')
+          .replace(/'/g, '&#39;');
+      const totalIn =
+        (dc.totalCashIn ?? 0) +
+        (dc.totalBkashIn ?? 0) +
+        (dc.totalNagadIn ?? 0) +
+        (dc.totalRocketIn ?? 0) +
+        (dc.totalBankIn ?? 0) +
+        (dc.totalSslIn ?? 0);
+      const totalOut =
+        (dc.totalCashOut ?? 0) +
+        (dc.totalBkashOut ?? 0) +
+        (dc.totalNagadOut ?? 0) +
+        (dc.totalRocketOut ?? 0) +
+        (dc.totalBankOut ?? 0) +
+        (dc.totalSslOut ?? 0);
+      const totalOpenBal =
+        (dc.openingCash ?? 0) +
+        (dc.openingBkash ?? 0) +
+        (dc.openingNagad ?? 0) +
+        (dc.openingRocket ?? 0) +
+        (dc.openingBank ?? 0) +
+        (dc.openingSsl ?? 0);
+      const totalCloseBal =
+        (dc.closingCash ?? 0) +
+        (dc.closingBkash ?? 0) +
+        (dc.closingNagad ?? 0) +
+        (dc.closingRocket ?? 0) +
+        (dc.closingBank ?? 0) +
+        (dc.closingSsl ?? 0);
+      const totalPL = totalIn - totalOut;
+
+      const methods = [
+        { name: 'Cash', open: dc.openingCash ?? 0, inc: dc.totalCashIn ?? 0, exp: dc.totalCashOut ?? 0, close: dc.closingCash ?? 0 },
+        { name: 'bKash', open: dc.openingBkash ?? 0, inc: dc.totalBkashIn ?? 0, exp: dc.totalBkashOut ?? 0, close: dc.closingBkash ?? 0 },
+        { name: 'Nagad', open: dc.openingNagad ?? 0, inc: dc.totalNagadIn ?? 0, exp: dc.totalNagadOut ?? 0, close: dc.closingNagad ?? 0 },
+        { name: 'Rocket', open: dc.openingRocket ?? 0, inc: dc.totalRocketIn ?? 0, exp: dc.totalRocketOut ?? 0, close: dc.closingRocket ?? 0 },
+        { name: 'Bank', open: dc.openingBank ?? 0, inc: dc.totalBankIn ?? 0, exp: dc.totalBankOut ?? 0, close: dc.closingBank ?? 0 },
+        { name: 'SSL', open: dc.openingSsl ?? 0, inc: dc.totalSslIn ?? 0, exp: dc.totalSslOut ?? 0, close: dc.closingSsl ?? 0 },
+      ];
+
+      const previewTxs = dailyClosingOnlyTransactions.filter((t) => t.date === dc.date);
+      const { incomeCategories, expenseCategories } = computeCategoryBreakdown(previewTxs);
+      const categoryIncomeTotal = incomeCategories.reduce((sum, c) => sum + c.amount, 0);
+      const categoryExpenseTotal = expenseCategories.reduce((sum, c) => sum + c.amount, 0);
+
+      const htmlContent = `
+        <!DOCTYPE html>
+        <html>
+          <head>
+            <meta charset="utf-8" />
+            <title>Daily_Closing_Report_${escapeHtml(dc.date)}</title>
+            <style>
+              * { box-sizing: border-box; margin: 0; padding: 0; }
+              body {
+                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+                color: #0f172a;
+                background: #f8fafc;
+                padding: 20px;
+                -webkit-print-color-adjust: exact !important;
+                print-color-adjust: exact !important;
+              }
+              .page {
+                max-width: 800px;
+                margin: 0 auto;
+                background: #ffffff;
+                padding: 28px;
+                border-radius: 14px;
+                border: 1px solid #e2e8f0;
+              }
+              .print-toolbar {
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                background: #f0fdfa;
+                border: 1px solid #99f6e4;
+                padding: 12px 16px;
+                border-radius: 10px;
+                margin-bottom: 20px;
+              }
+              .print-toolbar span { font-size: 12px; font-weight: 700; color: #115e59; }
+              .btn-group { display: flex; gap: 8px; }
+              .btn-print {
+                background: #0d9488; color: #ffffff; border: none; border-radius: 8px;
+                padding: 8px 14px; font-size: 12px; font-weight: 700; cursor: pointer;
+              }
+              .btn-close {
+                background: #e2e8f0; color: #334155; border: none; border-radius: 8px;
+                padding: 8px 14px; font-size: 12px; font-weight: 700; cursor: pointer;
+              }
+              @media print {
+                .no-print { display: none !important; }
+                html, body { background: #ffffff; padding: 0; margin: 0; }
+                .page { border: none; padding: 0; max-width: 100%; border-radius: 0; box-shadow: none; }
+                .section, .grid-2, .summary-box, .sigs { break-inside: avoid; page-break-inside: avoid; }
+                @page { size: A4 portrait; margin: 10mm; }
+              }
+              .header { text-align: center; border-bottom: 1.5px dashed #cbd5e1; padding-bottom: 10px; margin-bottom: 10px; }
+              .header h1 { font-size: 16px; font-weight: 800; letter-spacing: 0.6px; text-transform: uppercase; color: #0f172a; }
+              .header p { font-size: 9.5px; font-weight: 600; color: #64748b; letter-spacing: 1px; text-transform: uppercase; margin-top: 2px; }
+              .meta { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; font-size: 10px; color: #475569; padding-bottom: 10px; margin-bottom: 14px; border-bottom: 1px dashed #cbd5e1; }
+              .meta strong { color: #0f172a; }
+              .section { border: 1px solid #e2e8f0; border-radius: 10px; padding: 10px 12px; margin-bottom: 12px; background: #ffffff; }
+              .section-title { font-size: 9px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.5px; color: #475569; border-bottom: 1px solid #e2e8f0; padding-bottom: 5px; margin-bottom: 6px; display: flex; justify-content: space-between; }
+              table { width: 100%; border-collapse: collapse; font-size: 10px; }
+              th { text-align: left; font-size: 8.5px; text-transform: uppercase; color: #64748b; padding: 5px 4px; border-bottom: 1px solid #cbd5e1; }
+              td { padding: 5px 4px; border-bottom: 1px solid #f1f5f9; }
+              .num { text-align: right; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+              .inc { color: #059669; font-weight: 700; }
+              .exp { color: #e11d48; font-weight: 700; }
+              .bold { font-weight: 800; color: #0f172a; }
+              .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px; }
+              .cat-grid-2 { display: grid; grid-template-columns: 1fr 1fr; column-gap: 20px; }
+              .row-item { display: flex; justify-content: space-between; font-size: 10px; padding: 3.5px 0; border-bottom: 1px dashed #e2e8f0; gap: 8px; }
+              .summary-box { border: 1.5px solid #0f172a; border-radius: 8px; padding: 10px 14px; margin-bottom: 12px; font-size: 10.5px; }
+              .summary-row { display: flex; justify-content: space-between; font-weight: 700; padding: 3px 0; }
+              .summary-grand { display: flex; justify-content: space-between; font-weight: 800; font-size: 12px; border-top: 1px solid #cbd5e1; margin-top: 5px; padding-top: 6px; color: #0f172a; }
+              .notes-box { padding: 8px 12px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; font-size: 10px; color: #475569; margin-bottom: 14px; font-style: italic; }
+              .sigs { display: flex; justify-content: space-between; margin-top: 28px; padding-top: 8px; }
+              .sig-box { width: 150px; text-align: center; }
+              .sig-line { border-top: 1px solid #0f172a; padding-top: 4px; font-size: 9px; font-weight: 700; text-transform: uppercase; color: #64748b; }
+            </style>
+          </head>
+          <body>
+            <div class="page">
+              <div class="print-toolbar no-print">
+                <span>Daily Closing Print View (${escapeHtml(dc.date)})</span>
+                <div class="btn-group">
+                  <button type="button" class="btn-print" onclick="window.print()">Print Now</button>
+                  <button type="button" class="btn-close" onclick="window.close()">Close</button>
+                </div>
+              </div>
+
+              <div class="header">
+                <h1>Titas Broadband &amp; Accounting</h1>
+                <p>Daily Closing &amp; Financial Statement Report</p>
+              </div>
+
+              <div class="meta">
+                <div><strong>REPORT DATE:</strong> ${escapeHtml(dc.date)}</div>
+                <div style="text-align: right;"><strong>GENERATED BY:</strong> ${escapeHtml(dc.closedBy || 'System Admin')}</div>
+                <div><strong>SYSTEM STATUS:</strong> <span style="font-weight: 800; color: ${dc.status === 'closed' ? '#047857' : '#b45309'};">${escapeHtml((dc.status || 'open').toUpperCase())}</span></div>
+                <div style="text-align: right;"><strong>RUN TIME:</strong> ${escapeHtml(new Date().toLocaleTimeString())} BDT</div>
+              </div>
+
+              <div class="section">
+                <div class="section-title">
+                  <span>Detailed Breakdown by Payment Method</span>
+                  <span>BDT</span>
+                </div>
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Method</th>
+                      <th class="num">Opening</th>
+                      <th class="num">Inflow (+)</th>
+                      <th class="num">Outflow (-)</th>
+                      <th class="num">Closing</th>
+                      <th class="num">P/L</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    ${methods.map((m) => {
+                      const pl = m.inc - m.exp;
+                      const plText = pl > 0 ? `+${pl.toLocaleString()}` : pl < 0 ? `-${Math.abs(pl).toLocaleString()}` : '0';
+                      const plCls = pl > 0 ? 'inc' : pl < 0 ? 'exp' : 'bold';
+                      return `
+                        <tr>
+                          <td class="bold">${m.name}</td>
+                          <td class="num">${m.open.toLocaleString()}</td>
+                          <td class="num inc">+${m.inc.toLocaleString()}</td>
+                          <td class="num exp">-${m.exp.toLocaleString()}</td>
+                          <td class="num bold">${m.close.toLocaleString()}</td>
+                          <td class="num ${plCls}">${plText}</td>
+                        </tr>
+                      `;
+                    }).join('')}
+                    <tr style="background: #f8fafc;">
+                      <td class="bold">Total</td>
+                      <td class="num bold">${totalOpenBal.toLocaleString()}</td>
+                      <td class="num inc">+${totalIn.toLocaleString()}</td>
+                      <td class="num exp">-${totalOut.toLocaleString()}</td>
+                      <td class="num bold">${totalCloseBal.toLocaleString()}</td>
+                      <td class="num ${totalPL > 0 ? 'inc' : totalPL < 0 ? 'exp' : 'bold'}">${totalPL > 0 ? `+${totalPL.toLocaleString()}` : totalPL < 0 ? `-${Math.abs(totalPL).toLocaleString()}` : '0'}</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+
+              <div class="grid-2">
+                <div class="section" style="margin-bottom: 0;">
+                  <div class="section-title"><span>Cash Summary Details</span><span>BDT</span></div>
+                  <div class="row-item"><span>KHA Office Cash</span><span class="bold">${(dc.khaOfficeCash ?? 0).toLocaleString()} ৳</span></div>
+                  <div class="row-item"><span>Dhaka office</span><span class="bold">${(dc.dhakaOfficeCash ?? 0).toLocaleString()} ৳</span></div>
+                  <div class="row-item"><span>Nayan Cash</span><span class="bold">${(dc.nayanCash ?? 0).toLocaleString()} ৳</span></div>
+                  <div class="row-item" style="border-bottom: none;"><span>Account Cash</span><span class="bold">${(dc.accountCash ?? 0).toLocaleString()} ৳</span></div>
+                </div>
+                <div class="section" style="margin-bottom: 0;">
+                  <div class="section-title"><span>Transfer Money Details</span><span>BDT</span></div>
+                  <div class="row-item"><span>KHA Office to Nayan</span><span class="bold">${(dc.transferKhaToNayan ?? 0).toLocaleString()} ৳</span></div>
+                  <div class="row-item"><span>Nayan to Dhaka office</span><span class="bold">${(dc.transferNayanToDhaka ?? 0).toLocaleString()} ৳</span></div>
+                  <div class="row-item"><span>Dhaka office to Nayan</span><span class="bold">${(dc.transferDhakaToNayan ?? 0).toLocaleString()} ৳</span></div>
+                  <div class="row-item" style="border-bottom: none;"><span>Dhaka to KHA Office</span><span class="bold">${(dc.transferDhakaToKha ?? 0).toLocaleString()} ৳</span></div>
+                </div>
+              </div>
+
+              <div class="section">
+                <div class="section-title">
+                  <span>Daily Closing Entry &amp; Expense Logs</span>
+                  <span>${previewTxs.length} Entries</span>
+                </div>
+                ${previewTxs.length === 0 ? `
+                  <div style="text-align: center; padding: 10px; color: #94a3b8; font-style: italic; font-size: 10px;">
+                    No entry statements or expense logs recorded for this day.
+                  </div>
+                ` : `
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>Category</th>
+                        <th>Method</th>
+                        <th style="text-align: right;">Type</th>
+                        <th class="num">Amount</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      ${previewTxs.map((tx) => `
+                        <tr>
+                          <td class="bold">${escapeHtml(getCategoryLabel(tx))}</td>
+                          <td style="text-transform: capitalize;">${escapeHtml(tx.paymentMethod || 'cash')}</td>
+                          <td style="text-align: right;" class="${tx.type === 'income' ? 'inc' : 'exp'}">${tx.type === 'income' ? 'INFLOW' : 'OUTFLOW'}</td>
+                          <td class="num ${tx.type === 'income' ? 'inc' : 'exp'}">${tx.type === 'income' ? '+' : '-'}${(tx.amount ?? 0).toLocaleString()} BDT</td>
+                        </tr>
+                      `).join('')}
+                    </tbody>
+                  </table>
+                `}
+              </div>
+
+              <div class="summary-box">
+                <div class="summary-row"><span>TOTAL OPENING BALANCE:</span><span class="num">${totalOpenBal.toLocaleString()} BDT</span></div>
+                <div class="summary-row inc"><span>(+) TOTAL COLLECTION (INFLOW):</span><span class="num">+ ${totalIn.toLocaleString()} BDT</span></div>
+                <div class="summary-row exp"><span>(-) TOTAL EXPENSE (OUTFLOW):</span><span class="num">- ${totalOut.toLocaleString()} BDT</span></div>
+                <div class="summary-grand"><span>(=) GRAND CLOSING BALANCE:</span><span class="num">${totalCloseBal.toLocaleString()} BDT</span></div>
+              </div>
+
+              <div class="section">
+                <div class="section-title">
+                  <span style="color: #047857;">Category-Wise Income Statement (${escapeHtml(dc.date)})</span>
+                  <span style="color: #047857;">Total: +${categoryIncomeTotal.toLocaleString()} BDT</span>
+                </div>
+                <div class="cat-grid-2">
+                  ${incomeCategories.map((c) => `
+                    <div class="row-item">
+                      <span>${escapeHtml(c.label)}${c.count > 0 ? ` (${c.count})` : ''}</span>
+                      <span class="${c.amount > 0 ? 'inc' : 'bold'}">+${c.amount.toLocaleString()} BDT</span>
+                    </div>
+                  `).join('')}
+                </div>
+              </div>
+
+              <div class="section">
+                <div class="section-title">
+                  <span style="color: #be123c;">Category-Wise Expense Statement (${escapeHtml(dc.date)})</span>
+                  <span style="color: #be123c;">Total: -${categoryExpenseTotal.toLocaleString()} BDT</span>
+                </div>
+                <div class="cat-grid-2">
+                  ${expenseCategories.map((c) => `
+                    <div class="row-item">
+                      <span>${escapeHtml(c.label)}${c.count > 0 ? ` (${c.count})` : ''}</span>
+                      <span class="${c.amount > 0 ? 'exp' : 'bold'}">-${c.amount.toLocaleString()} BDT</span>
+                    </div>
+                  `).join('')}
+                </div>
+              </div>
+
+              ${dc.notes ? `<div class="notes-box"><strong>Notes / Comments:</strong> ${escapeHtml(dc.notes)}</div>` : ''}
+
+              <div class="sigs">
+                <div class="sig-box"><div class="sig-line">Prepared By</div></div>
+                <div class="sig-box"><div class="sig-line">Approved By</div></div>
+              </div>
+            </div>
+          </body>
+        </html>
+      `;
+
+      const printWindow = window.open('', '_blank');
+      if (printWindow) {
+        printWindow.document.open();
+        printWindow.document.write(htmlContent);
+        printWindow.document.close();
+        printWindow.focus();
+      } else {
+        window.print();
+      }
+    } catch (err) {
+      console.error('Failed to open Daily Closing print view:', err);
+      window.print();
+    }
+  };
+
+  const handleDownloadClosingExcel = (dc: DailyClosing) => {
+    try {
+      const totalIn =
+        (dc.totalCashIn ?? 0) +
+        (dc.totalBkashIn ?? 0) +
+        (dc.totalNagadIn ?? 0) +
+        (dc.totalRocketIn ?? 0) +
+        (dc.totalBankIn ?? 0) +
+        (dc.totalSslIn ?? 0);
+      const totalOut =
+        (dc.totalCashOut ?? 0) +
+        (dc.totalBkashOut ?? 0) +
+        (dc.totalNagadOut ?? 0) +
+        (dc.totalRocketOut ?? 0) +
+        (dc.totalBankOut ?? 0) +
+        (dc.totalSslOut ?? 0);
+      const totalOpenBal =
+        (dc.openingCash ?? 0) +
+        (dc.openingBkash ?? 0) +
+        (dc.openingNagad ?? 0) +
+        (dc.openingRocket ?? 0) +
+        (dc.openingBank ?? 0) +
+        (dc.openingSsl ?? 0);
+      const totalCloseBal =
+        (dc.closingCash ?? 0) +
+        (dc.closingBkash ?? 0) +
+        (dc.closingNagad ?? 0) +
+        (dc.closingRocket ?? 0) +
+        (dc.closingBank ?? 0) +
+        (dc.closingSsl ?? 0);
+
+      const methodRows = [
+        { name: 'Cash', open: dc.openingCash ?? 0, inc: dc.totalCashIn ?? 0, exp: dc.totalCashOut ?? 0, close: dc.closingCash ?? 0 },
+        { name: 'bKash', open: dc.openingBkash ?? 0, inc: dc.totalBkashIn ?? 0, exp: dc.totalBkashOut ?? 0, close: dc.closingBkash ?? 0 },
+        { name: 'Nagad', open: dc.openingNagad ?? 0, inc: dc.totalNagadIn ?? 0, exp: dc.totalNagadOut ?? 0, close: dc.closingNagad ?? 0 },
+        { name: 'Rocket', open: dc.openingRocket ?? 0, inc: dc.totalRocketIn ?? 0, exp: dc.totalRocketOut ?? 0, close: dc.closingRocket ?? 0 },
+        { name: 'Bank Transfer', open: dc.openingBank ?? 0, inc: dc.totalBankIn ?? 0, exp: dc.totalBankOut ?? 0, close: dc.closingBank ?? 0 },
+        { name: 'SSL Commerz', open: dc.openingSsl ?? 0, inc: dc.totalSslIn ?? 0, exp: dc.totalSslOut ?? 0, close: dc.closingSsl ?? 0 },
+      ];
+
+      const summaryRows: (string | number)[][] = [
+        ['TITAS BROADBAND & ACCOUNTING'],
+        ['DAILY CLOSING & FINANCIAL STATEMENT REPORT'],
+        ['Report Date', dc.date, 'Status', (dc.status || 'open').toUpperCase(), 'Generated By', dc.closedBy || 'System Admin'],
+        [],
+        ['DETAILED BREAKDOWN BY PAYMENT METHOD'],
+        ['Payment Method', 'Opening Balance (BDT)', 'Inflow (+) (BDT)', 'Outflow (-) (BDT)', 'Closing Balance (BDT)', 'P/L (BDT)'],
+        ...methodRows.map((m) => [m.name, m.open, m.inc, m.exp, m.close, m.inc - m.exp]),
+        ['TOTAL', totalOpenBal, totalIn, totalOut, totalCloseBal, totalIn - totalOut],
+        [],
+        ['CASH DRAWER STATEMENT', 'AMOUNT (BDT)', '', 'TRANSFER MONEY DETAILS', 'AMOUNT (BDT)'],
+        ['KHA Office Cash', dc.khaOfficeCash ?? 0, '', 'KHA Office to Nayan', dc.transferKhaToNayan ?? 0],
+        ['Dhaka office', dc.dhakaOfficeCash ?? 0, '', 'Nayan to Dhaka office', dc.transferNayanToDhaka ?? 0],
+        ['Nayan Cash', dc.nayanCash ?? 0, '', 'Dhaka office to Nayan', dc.transferDhakaToNayan ?? 0],
+        ['Account Cash', dc.accountCash ?? 0, '', 'Dhaka to KHA Office', dc.transferDhakaToKha ?? 0],
+        [],
+        ['FINANCIAL SUMMARY', 'AMOUNT (BDT)'],
+        ['Total Opening Balance', totalOpenBal],
+        ['(+) Total Collection (Inflow)', totalIn],
+        ['(-) Total Expense (Outflow)', totalOut],
+        ['(=) Grand Closing Balance', totalCloseBal],
+      ];
+
+      const previewTxs = dailyClosingOnlyTransactions.filter((t) => t.date === dc.date);
+      const { incomeCategories, expenseCategories } = computeCategoryBreakdown(previewTxs);
+      const categoryIncomeTotal = incomeCategories.reduce((sum, c) => sum + c.amount, 0);
+      const categoryExpenseTotal = expenseCategories.reduce((sum, c) => sum + c.amount, 0);
+
+      summaryRows.push(
+        [],
+        [`CATEGORY-WISE INCOME STATEMENT (${dc.date})`, 'ENTRIES', 'AMOUNT (BDT)'],
+        ...incomeCategories.map((c) => [c.label, c.count, c.amount]),
+        ['Total Category Income', previewTxs.filter((t) => t.type === 'income').length, categoryIncomeTotal],
+        [],
+        [`CATEGORY-WISE EXPENSE STATEMENT (${dc.date})`, 'ENTRIES', 'AMOUNT (BDT)'],
+        ...expenseCategories.map((c) => [c.label, c.count, c.amount]),
+        ['Total Category Expense', previewTxs.filter((t) => t.type === 'expense').length, categoryExpenseTotal]
+      );
+
+      if (dc.notes) {
+        summaryRows.push([], ['Notes / Comments', dc.notes]);
+      }
+      const logRows: (string | number)[][] = [
+        ['SL', 'Date', 'Category', 'Payment Method', 'Type', 'Amount (BDT)', 'Notes'],
+        ...previewTxs.map((tx, idx) => [
+          idx + 1,
+          tx.date,
+          getCategoryLabel(tx),
+          (tx.paymentMethod || 'cash').toUpperCase(),
+          tx.type === 'income' ? 'INFLOW' : 'OUTFLOW',
+          tx.amount ?? 0,
+          tx.notes || '',
+        ]),
+      ];
+
+      const wb = XLSX.utils.book_new();
+      const wsSummary = XLSX.utils.aoa_to_sheet(summaryRows);
+      wsSummary['!cols'] = [{ wch: 28 }, { wch: 22 }, { wch: 18 }, { wch: 24 }, { wch: 22 }, { wch: 16 }];
+      XLSX.utils.book_append_sheet(wb, wsSummary, 'Daily Closing');
+
+      const wsLogs = XLSX.utils.aoa_to_sheet(logRows);
+      wsLogs['!cols'] = [{ wch: 6 }, { wch: 14 }, { wch: 28 }, { wch: 18 }, { wch: 12 }, { wch: 16 }, { wch: 32 }];
+      XLSX.utils.book_append_sheet(wb, wsLogs, 'Entry & Expense Logs');
+
+      XLSX.writeFile(wb, `Daily_Closing_Report_${dc.date}.xlsx`);
+    } catch (err) {
+      console.error('Failed to generate Excel:', err);
+      alert('Failed to generate Excel report. Please try again.');
     }
   };
 
@@ -1722,51 +3263,32 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile, 
                       <th className="py-1 text-right">INFLOW (+)</th>
                       <th className="py-1 text-right">OUTFLOW (-)</th>
                       <th className="py-1 text-right">CLOSING</th>
+                      <th className="py-1 text-right">P/L</th>
                     </tr>
                   </thead>
                   <tbody>
-                    <tr className="border-b border-slate-100">
-                      <td className="py-1.5 font-semibold text-slate-700">Cash</td>
-                      <td className="py-1.5 text-right font-mono">{(printPreviewData.openingCash ?? 0).toLocaleString()}</td>
-                      <td className="py-1.5 text-right font-mono text-emerald-600">+{(printPreviewData.totalCashIn ?? 0).toLocaleString()}</td>
-                      <td className="py-1.5 text-right font-mono text-rose-600">-{(printPreviewData.totalCashOut ?? 0).toLocaleString()}</td>
-                      <td className="py-1.5 text-right font-mono font-bold text-slate-900">{(printPreviewData.closingCash ?? 0).toLocaleString()}</td>
-                    </tr>
-                    <tr className="border-b border-slate-100">
-                      <td className="py-1.5 font-semibold text-slate-700">bKash</td>
-                      <td className="py-1.5 text-right font-mono">{(printPreviewData.openingBkash ?? 0).toLocaleString()}</td>
-                      <td className="py-1.5 text-right font-mono text-emerald-600">+{(printPreviewData.totalBkashIn ?? 0).toLocaleString()}</td>
-                      <td className="py-1.5 text-right font-mono text-rose-600">-{(printPreviewData.totalBkashOut ?? 0).toLocaleString()}</td>
-                      <td className="py-1.5 text-right font-mono font-bold text-slate-900">{(printPreviewData.closingBkash ?? 0).toLocaleString()}</td>
-                    </tr>
-                    <tr className="border-b border-slate-100">
-                      <td className="py-1.5 font-semibold text-slate-700">Nagad</td>
-                      <td className="py-1.5 text-right font-mono">{(printPreviewData.openingNagad ?? 0).toLocaleString()}</td>
-                      <td className="py-1.5 text-right font-mono text-emerald-600">+{(printPreviewData.totalNagadIn ?? 0).toLocaleString()}</td>
-                      <td className="py-1.5 text-right font-mono text-rose-600">-{(printPreviewData.totalNagadOut ?? 0).toLocaleString()}</td>
-                      <td className="py-1.5 text-right font-mono font-bold text-slate-900">{(printPreviewData.closingNagad ?? 0).toLocaleString()}</td>
-                    </tr>
-                    <tr className="border-b border-slate-100">
-                      <td className="py-1.5 font-semibold text-slate-700">Rocket</td>
-                      <td className="py-1.5 text-right font-mono">{(printPreviewData.openingRocket ?? 0).toLocaleString()}</td>
-                      <td className="py-1.5 text-right font-mono text-emerald-600">+{(printPreviewData.totalRocketIn ?? 0).toLocaleString()}</td>
-                      <td className="py-1.5 text-right font-mono text-rose-600">-{(printPreviewData.totalRocketOut ?? 0).toLocaleString()}</td>
-                      <td className="py-1.5 text-right font-mono font-bold text-slate-900">{(printPreviewData.closingRocket ?? 0).toLocaleString()}</td>
-                    </tr>
-                    <tr className="border-b border-slate-100">
-                      <td className="py-1.5 font-semibold text-slate-700">Bank</td>
-                      <td className="py-1.5 text-right font-mono">{(printPreviewData.openingBank ?? 0).toLocaleString()}</td>
-                      <td className="py-1.5 text-right font-mono text-emerald-600">+{(printPreviewData.totalBankIn ?? 0).toLocaleString()}</td>
-                      <td className="py-1.5 text-right font-mono text-rose-600">-{(printPreviewData.totalBankOut ?? 0).toLocaleString()}</td>
-                      <td className="py-1.5 text-right font-mono font-bold text-slate-900">{(printPreviewData.closingBank ?? 0).toLocaleString()}</td>
-                    </tr>
-                    <tr className="border-b border-slate-100">
-                      <td className="py-1.5 font-semibold text-slate-700">SSL</td>
-                      <td className="py-1.5 text-right font-mono">{(printPreviewData.openingSsl ?? 0).toLocaleString()}</td>
-                      <td className="py-1.5 text-right font-mono text-emerald-600">+{(printPreviewData.totalSslIn ?? 0).toLocaleString()}</td>
-                      <td className="py-1.5 text-right font-mono text-rose-600">-{(printPreviewData.totalSslOut ?? 0).toLocaleString()}</td>
-                      <td className="py-1.5 text-right font-mono font-bold text-slate-900">{(printPreviewData.closingSsl ?? 0).toLocaleString()}</td>
-                    </tr>
+                    {[
+                      { name: 'Cash', open: printPreviewData.openingCash ?? 0, inc: printPreviewData.totalCashIn ?? 0, exp: printPreviewData.totalCashOut ?? 0, close: printPreviewData.closingCash ?? 0 },
+                      { name: 'bKash', open: printPreviewData.openingBkash ?? 0, inc: printPreviewData.totalBkashIn ?? 0, exp: printPreviewData.totalBkashOut ?? 0, close: printPreviewData.closingBkash ?? 0 },
+                      { name: 'Nagad', open: printPreviewData.openingNagad ?? 0, inc: printPreviewData.totalNagadIn ?? 0, exp: printPreviewData.totalNagadOut ?? 0, close: printPreviewData.closingNagad ?? 0 },
+                      { name: 'Rocket', open: printPreviewData.openingRocket ?? 0, inc: printPreviewData.totalRocketIn ?? 0, exp: printPreviewData.totalRocketOut ?? 0, close: printPreviewData.closingRocket ?? 0 },
+                      { name: 'Bank', open: printPreviewData.openingBank ?? 0, inc: printPreviewData.totalBankIn ?? 0, exp: printPreviewData.totalBankOut ?? 0, close: printPreviewData.closingBank ?? 0 },
+                      { name: 'SSL', open: printPreviewData.openingSsl ?? 0, inc: printPreviewData.totalSslIn ?? 0, exp: printPreviewData.totalSslOut ?? 0, close: printPreviewData.closingSsl ?? 0 },
+                    ].map((m) => {
+                      const pl = m.inc - m.exp;
+                      return (
+                        <tr key={m.name} className="border-b border-slate-100">
+                          <td className="py-1.5 font-semibold text-slate-700">{m.name}</td>
+                          <td className="py-1.5 text-right font-mono">{m.open.toLocaleString()}</td>
+                          <td className="py-1.5 text-right font-mono text-emerald-600">+{m.inc.toLocaleString()}</td>
+                          <td className="py-1.5 text-right font-mono text-rose-600">-{m.exp.toLocaleString()}</td>
+                          <td className="py-1.5 text-right font-mono font-bold text-slate-900">{m.close.toLocaleString()}</td>
+                          <td className={`py-1.5 text-right font-mono font-bold ${pl > 0 ? 'text-emerald-600' : pl < 0 ? 'text-rose-600' : 'text-slate-500'}`}>
+                            {pl > 0 ? `+${pl.toLocaleString()}` : pl < 0 ? `-${Math.abs(pl).toLocaleString()}` : '0'}
+                          </td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>
@@ -1913,6 +3435,51 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile, 
                 </div>
               </div>
 
+              {/* Category-Wise Income & Expense Statements */}
+              {(() => {
+                const previewTxsForCats = dailyClosingOnlyTransactions.filter((t) => t.date === printPreviewData.date);
+                const { incomeCategories, expenseCategories } = computeCategoryBreakdown(previewTxsForCats);
+                const catIncomeTotal = incomeCategories.reduce((sum, c) => sum + c.amount, 0);
+                const catExpenseTotal = expenseCategories.reduce((sum, c) => sum + c.amount, 0);
+                return (
+                  <>
+                    <div className="border border-slate-200 rounded-xl p-3 mb-4 bg-white">
+                      <div className="flex items-center justify-between text-[9px] font-extrabold uppercase tracking-wider text-emerald-700 border-b border-slate-200 pb-1.5 mb-2">
+                        <span>Category-Wise Income Statement ({printPreviewData.date})</span>
+                        <span>Total: +{catIncomeTotal.toLocaleString()} BDT</span>
+                      </div>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-5">
+                        {incomeCategories.map((c) => (
+                          <div key={c.key} className="flex items-center justify-between text-[9.5px] py-1 border-b border-dashed border-slate-200 gap-2">
+                            <span className="text-slate-700">{c.label}{c.count > 0 ? ` (${c.count})` : ''}</span>
+                            <span className={`font-mono font-bold whitespace-nowrap ${c.amount > 0 ? 'text-emerald-600' : 'text-slate-900'}`}>
+                              +{c.amount.toLocaleString()} BDT
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+
+                    <div className="border border-slate-200 rounded-xl p-3 mb-5 bg-white">
+                      <div className="flex items-center justify-between text-[9px] font-extrabold uppercase tracking-wider text-rose-700 border-b border-slate-200 pb-1.5 mb-2">
+                        <span>Category-Wise Expense Statement ({printPreviewData.date})</span>
+                        <span>Total: -{catExpenseTotal.toLocaleString()} BDT</span>
+                      </div>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-5">
+                        {expenseCategories.map((c) => (
+                          <div key={c.key} className="flex items-center justify-between text-[9.5px] py-1 border-b border-dashed border-slate-200 gap-2">
+                            <span className="text-slate-700">{c.label}{c.count > 0 ? ` (${c.count})` : ''}</span>
+                            <span className={`font-mono font-bold whitespace-nowrap ${c.amount > 0 ? 'text-rose-600' : 'text-slate-900'}`}>
+                              -{c.amount.toLocaleString()} BDT
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  </>
+                );
+              })()}
+
               {/* Notes */}
               {printPreviewData.notes && (
                 <div className="p-3 bg-slate-50 border border-slate-200/50 rounded-lg text-[10px] text-slate-500 mb-5 italic leading-relaxed">
@@ -1929,24 +3496,31 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile, 
           </div>
 
           {/* Action Footer */}
-          <div className="flex items-center gap-3 mt-4 shrink-0 no-print">
+          <div className="flex flex-wrap items-center gap-2.5 mt-4 shrink-0 no-print">
             <button
-              onClick={() => window.print()}
-              className="flex-1 py-3 bg-teal-600 hover:bg-teal-700 text-white text-xs font-bold rounded-xl flex items-center justify-center gap-2 transition cursor-pointer shadow-lg shadow-teal-600/10"
+              onClick={() => handleOpenClosingPrintView(printPreviewData)}
+              className="flex-1 min-w-[130px] py-3 bg-teal-600 hover:bg-teal-700 text-white text-xs font-bold rounded-xl flex items-center justify-center gap-2 transition cursor-pointer shadow-lg shadow-teal-600/10"
             >
               <Printer className="w-4 h-4" />
-              <span>Print Formally</span>
+              <span>Print View</span>
             </button>
             <button
               onClick={() => handleDownloadClosingPDF(printPreviewData)}
-              className="flex-1 py-3 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold rounded-xl flex items-center justify-center gap-2 transition cursor-pointer shadow-lg shadow-indigo-600/10"
+              className="flex-1 min-w-[130px] py-3 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold rounded-xl flex items-center justify-center gap-2 transition cursor-pointer shadow-lg shadow-indigo-600/10"
             >
               <FileDown className="w-4 h-4" />
               <span>Download PDF</span>
             </button>
             <button
+              onClick={() => handleDownloadClosingExcel(printPreviewData)}
+              className="flex-1 min-w-[130px] py-3 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded-xl flex items-center justify-center gap-2 transition cursor-pointer shadow-lg shadow-emerald-600/10"
+            >
+              <FileSpreadsheet className="w-4 h-4" />
+              <span>Download Excel</span>
+            </button>
+            <button
               onClick={() => setPrintPreviewData(null)}
-              className="py-3 px-6 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold rounded-xl transition cursor-pointer"
+              className="py-3 px-5 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold rounded-xl transition cursor-pointer"
             >
               Close Preview
             </button>
@@ -2032,6 +3606,18 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile, 
             <Coins className="w-4 h-4" />
             <span>Cash Details</span>
           </button>
+          <button
+            type="button"
+            onClick={() => {
+              setError('');
+              setClosingMonth(selectedDate.slice(0, 7));
+              setActiveEntryModal('month_closing');
+            }}
+            className="px-4 py-2.5 bg-teal-600 hover:bg-teal-700 text-white rounded-xl text-xs font-extrabold flex items-center gap-2 shadow-sm shadow-teal-600/20 transition cursor-pointer"
+          >
+            <Calendar className="w-4 h-4" />
+            <span>Month Closing</span>
+          </button>
         </div>
 
         <div className="flex items-center gap-2 pr-1">
@@ -2048,59 +3634,58 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile, 
       </div>
 
       {/* Main calculation workspace */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
-        
-        {/* Left Side 2-Columns: Summary Cards, Method Breakdown & Cash Details Preview */}
-        <div className="lg:col-span-2 space-y-6">
-          {/* 3 Summary Cards (Read-only Overview) */}
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            {/* Income Summary Card */}
-            <div className="bg-white rounded-2xl p-5 border border-slate-200/60 shadow-sm flex items-start justify-between">
-              <div>
-                <span className="text-[10px] font-black uppercase tracking-wider text-emerald-600 block">Daily Income</span>
-                <h4 className="text-xl font-black font-mono text-slate-900 mt-1">+{totalInflow.toLocaleString()} ৳</h4>
-                <p className="text-[11px] text-slate-400 font-medium mt-0.5">
-                  {dateTransactions.filter(t => t.type === 'income').length} entries on {selectedDate}
-                </p>
-              </div>
-              <span className="p-2.5 bg-emerald-50 text-emerald-600 rounded-xl">
-                <TrendingUp className="w-5 h-5" />
-              </span>
+      <div className="space-y-6">
+        {/* 3 Summary Cards (Read-only Overview) */}
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          {/* Income Summary Card */}
+          <div className="bg-white rounded-2xl p-5 border border-slate-200/60 shadow-sm flex items-start justify-between">
+            <div>
+              <span className="text-[10px] font-black uppercase tracking-wider text-emerald-600 block">Daily Income</span>
+              <h4 className="text-xl font-black font-mono text-slate-900 mt-1">+{totalInflow.toLocaleString()} ৳</h4>
+              <p className="text-[11px] text-slate-400 font-medium mt-0.5">
+                {dateTransactions.filter(t => t.type === 'income').length} entries on {selectedDate}
+              </p>
             </div>
-
-            {/* Expense Summary Card */}
-            <div className="bg-white rounded-2xl p-5 border border-slate-200/60 shadow-sm flex items-start justify-between">
-              <div>
-                <span className="text-[10px] font-black uppercase tracking-wider text-rose-600 block">Daily Expense</span>
-                <h4 className="text-xl font-black font-mono text-slate-900 mt-1">-{totalOutflow.toLocaleString()} ৳</h4>
-                <p className="text-[11px] text-slate-400 font-medium mt-0.5">
-                  {dateTransactions.filter(t => t.type === 'expense').length} entries on {selectedDate}
-                </p>
-              </div>
-              <span className="p-2.5 bg-rose-50 text-rose-600 rounded-xl">
-                <TrendingDown className="w-5 h-5" />
-              </span>
-            </div>
-
-            {/* Cash Details Summary Card */}
-            <div className="bg-white rounded-2xl p-5 border border-slate-200/60 shadow-sm flex items-start justify-between">
-              <div>
-                <span className="text-[10px] font-black uppercase tracking-wider text-indigo-600 block">Cash Details</span>
-                <h4 className="text-xl font-black font-mono text-slate-900 mt-1">
-                  {(val(khaOfficeCash) + val(dhakaOfficeCash) + val(nayanCash) + val(accountCash)).toLocaleString()} ৳
-                </h4>
-                <p className="text-[11px] text-slate-400 font-medium mt-0.5">
-                  {isDateAlreadyClosed ? 'Locked & Closed' : isDrawerSubmitted ? 'Submitted Draft' : 'Pending Entry'}
-                </p>
-              </div>
-              <span className="p-2.5 bg-indigo-50 text-indigo-600 rounded-xl">
-                <Coins className="w-5 h-5" />
-              </span>
-            </div>
+            <span className="p-2.5 bg-emerald-50 text-emerald-600 rounded-xl">
+              <TrendingUp className="w-5 h-5" />
+            </span>
           </div>
 
+          {/* Expense Summary Card */}
+          <div className="bg-white rounded-2xl p-5 border border-slate-200/60 shadow-sm flex items-start justify-between">
+            <div>
+              <span className="text-[10px] font-black uppercase tracking-wider text-rose-600 block">Daily Expense</span>
+              <h4 className="text-xl font-black font-mono text-slate-900 mt-1">-{totalOutflow.toLocaleString()} ৳</h4>
+              <p className="text-[11px] text-slate-400 font-medium mt-0.5">
+                {dateTransactions.filter(t => t.type === 'expense').length} entries on {selectedDate}
+              </p>
+            </div>
+            <span className="p-2.5 bg-rose-50 text-rose-600 rounded-xl">
+              <TrendingDown className="w-5 h-5" />
+            </span>
+          </div>
+
+          {/* Cash Details Summary Card */}
+          <div className="bg-white rounded-2xl p-5 border border-slate-200/60 shadow-sm flex items-start justify-between">
+            <div>
+              <span className="text-[10px] font-black uppercase tracking-wider text-indigo-600 block">Cash Details</span>
+              <h4 className="text-xl font-black font-mono text-slate-900 mt-1">
+                {(val(khaOfficeCash) + val(dhakaOfficeCash) + val(nayanCash) + val(accountCash)).toLocaleString()} ৳
+              </h4>
+              <p className="text-[11px] text-slate-400 font-medium mt-0.5">
+                {isDateAlreadyClosed ? 'Locked & Closed' : isDrawerSubmitted ? 'Submitted Draft' : 'Pending Entry'}
+              </p>
+            </div>
+            <span className="p-2.5 bg-indigo-50 text-indigo-600 rounded-xl">
+              <Coins className="w-5 h-5" />
+            </span>
+          </div>
+        </div>
+
+        {/* Side-by-Side Row: Payment Method Balance Breakdown (Left) & Cash Details Statement (Right) */}
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 items-stretch">
           {/* Payment Method Breakdown Card */}
-          <div className="bg-white rounded-2xl p-6 border border-slate-200/60 shadow-sm">
+          <div className="bg-white rounded-2xl p-6 border border-slate-200/60 shadow-sm flex flex-col">
             <div className="flex items-center justify-between border-b border-slate-100 pb-4 mb-4">
               <div className="flex items-center gap-2.5">
                 <span className="p-2 bg-teal-50 text-teal-600 rounded-xl">
@@ -2113,15 +3698,16 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile, 
               </div>
             </div>
 
-            <div className="overflow-x-auto">
+            <div className="overflow-x-auto flex-1">
               <table className="w-full text-left border-collapse text-xs">
                 <thead>
                   <tr className="border-b border-slate-100 text-[10px] font-bold text-slate-400 uppercase tracking-wider">
-                    <th className="py-2.5 px-3">Payment Method</th>
-                    <th className="py-2.5 px-3 text-right">Opening</th>
-                    <th className="py-2.5 px-3 text-right">Income (+)</th>
-                    <th className="py-2.5 px-3 text-right">Expense (-)</th>
-                    <th className="py-2.5 px-3 text-right">Closing</th>
+                    <th className="py-2.5 px-2">Payment Method</th>
+                    <th className="py-2.5 px-2 text-right">Opening</th>
+                    <th className="py-2.5 px-2 text-right">Income (+)</th>
+                    <th className="py-2.5 px-2 text-right">Expense (-)</th>
+                    <th className="py-2.5 px-2 text-right">Closing</th>
+                    <th className="py-2.5 px-2 text-right">P/L</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
@@ -2132,26 +3718,47 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile, 
                     { key: 'rocket', label: 'Rocket', open: val(openingRocket), flow: rocketFlow, close: closingRocket },
                     { key: 'bank', label: 'Bank Transfer', open: val(openingBank), flow: bankFlow, close: closingBank },
                     { key: 'sslcommerz', label: 'SSL Commerz', open: val(openingSsl), flow: sslFlow, close: closingSsl },
-                  ].map((row) => (
-                    <tr key={row.key} className="hover:bg-slate-50/60 transition">
-                      <td className="py-2.5 px-3 font-bold text-slate-700 flex items-center gap-2.5">
-                        <PaymentMethodLogo method={row.key} className="w-6 h-6" />
-                        <span>{row.label}</span>
-                      </td>
-                      <td className="py-2.5 px-3 text-right font-mono text-slate-600">{row.open.toLocaleString()}</td>
-                      <td className="py-2.5 px-3 text-right font-mono font-bold text-emerald-600">+{row.flow.income.toLocaleString()}</td>
-                      <td className="py-2.5 px-3 text-right font-mono font-bold text-rose-600">-{row.flow.expense.toLocaleString()}</td>
-                      <td className="py-2.5 px-3 text-right font-mono font-extrabold text-slate-900">{row.close.toLocaleString()}</td>
-                    </tr>
-                  ))}
+                  ].map((row) => {
+                    const rowPL = row.flow.income - row.flow.expense;
+                    return (
+                      <tr key={row.key} className="hover:bg-slate-50/60 transition">
+                        <td className="py-2.5 px-2 font-bold text-slate-700 flex items-center gap-2 whitespace-nowrap">
+                          <PaymentMethodLogo method={row.key} className="w-5 h-5 sm:w-6 sm:h-6 shrink-0" />
+                          <span>{row.label}</span>
+                        </td>
+                        <td className="py-2.5 px-2 text-right font-mono text-slate-600 whitespace-nowrap">{row.open.toLocaleString()}</td>
+                        <td className="py-2.5 px-2 text-right font-mono font-bold text-emerald-600 whitespace-nowrap">+{row.flow.income.toLocaleString()}</td>
+                        <td className="py-2.5 px-2 text-right font-mono font-bold text-rose-600 whitespace-nowrap">-{row.flow.expense.toLocaleString()}</td>
+                        <td className="py-2.5 px-2 text-right font-mono font-extrabold text-slate-900 whitespace-nowrap">{row.close.toLocaleString()}</td>
+                        <td className={`py-2.5 px-2 text-right font-mono font-extrabold whitespace-nowrap ${rowPL > 0 ? 'text-emerald-600' : rowPL < 0 ? 'text-rose-600' : 'text-slate-500'}`}>
+                          {rowPL > 0 ? `+${rowPL.toLocaleString()}` : rowPL < 0 ? `-${Math.abs(rowPL).toLocaleString()}` : '0'}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                  {(() => {
+                    const dailyPL = totalInflow - totalOutflow;
+                    return (
+                      <tr className="bg-slate-50/90 font-extrabold">
+                        <td className="py-2.5 px-2 text-slate-800 whitespace-nowrap">Total</td>
+                        <td className="py-2.5 px-2 text-right font-mono text-slate-700 whitespace-nowrap">{totalOpening.toLocaleString()}</td>
+                        <td className="py-2.5 px-2 text-right font-mono text-emerald-600 whitespace-nowrap">+{totalInflow.toLocaleString()}</td>
+                        <td className="py-2.5 px-2 text-right font-mono text-rose-600 whitespace-nowrap">-{totalOutflow.toLocaleString()}</td>
+                        <td className="py-2.5 px-2 text-right font-mono text-slate-900 whitespace-nowrap">{totalClosing.toLocaleString()}</td>
+                        <td className={`py-2.5 px-2 text-right font-mono whitespace-nowrap ${dailyPL > 0 ? 'text-emerald-600' : dailyPL < 0 ? 'text-rose-600' : 'text-slate-600'}`}>
+                          {dailyPL > 0 ? `+${dailyPL.toLocaleString()}` : dailyPL < 0 ? `-${Math.abs(dailyPL).toLocaleString()}` : '0'}
+                        </td>
+                      </tr>
+                    );
+                  })()}
                 </tbody>
               </table>
             </div>
           </div>
 
-          {/* Submitted Cash Details Statement Card (only shown when submitted or closed) */}
-          {(isDrawerSubmitted || isDateAlreadyClosed) && (
-            <div className="bg-white rounded-2xl p-6 border border-indigo-100 shadow-sm">
+          {/* Cash Details Statement Card (Right side of Payment Method Breakdown) */}
+          <div className="bg-white rounded-2xl p-6 border border-indigo-100 shadow-sm flex flex-col justify-between">
+            <div>
               <div className="flex items-center justify-between border-b border-slate-100 pb-3.5 mb-4">
                 <div>
                   <h4 className="text-xs font-black text-indigo-950 uppercase tracking-wider flex items-center gap-2">
@@ -2159,12 +3766,12 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile, 
                     <span>Cash Details Statement ({selectedDate})</span>
                   </h4>
                   <p className="text-[10px] text-slate-400 font-medium mt-0.5">
-                    Status: {isDateAlreadyClosed ? 'Locked & Closed' : 'Verified Draft'}
+                    Status: {isDateAlreadyClosed ? 'Locked & Closed' : isDrawerSubmitted ? 'Verified Draft' : 'Pending Entry'}
                   </p>
                 </div>
               </div>
 
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
                 <div>
                   <h5 className="text-[10px] font-extrabold text-slate-400 uppercase tracking-widest mb-2.5 pb-1 border-b border-slate-100 flex items-center justify-between">
                     <span>Physical Cash Summary</span>
@@ -2228,114 +3835,118 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile, 
                 </div>
               </div>
             </div>
-          )}
-
+          </div>
         </div>
-        {/* Right Column: Submission Form / Closing Status */}
-        <div className="space-y-6">
-          <div className="bg-white rounded-2xl p-6 border border-slate-200/60 shadow-sm flex flex-col gap-5">
-            <div className="flex items-center gap-2 border-b border-slate-100 pb-4">
-              <span className="p-1.5 bg-indigo-50 text-indigo-600 rounded-lg">
-                <Check className="w-4 h-4" />
-              </span>
-              <h3 className="text-xs font-black text-slate-800 uppercase tracking-wider">Closing Summary</h3>
+
+        {/* Bottom Section: Closing Summary */}
+        <div className="bg-white rounded-2xl p-6 border border-slate-200/60 shadow-sm flex flex-col gap-5">
+          <div className="flex items-center gap-2 border-b border-slate-100 pb-4">
+            <span className="p-1.5 bg-indigo-50 text-indigo-600 rounded-lg">
+              <Check className="w-4 h-4" />
+            </span>
+            <h3 className="text-xs font-black text-slate-800 uppercase tracking-wider">Closing Summary</h3>
+          </div>
+
+          {/* Aggregated totals visualization */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 font-mono">
+            <div className="p-3.5 bg-slate-50 rounded-xl flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <TrendingUp className="w-3.5 h-3.5 text-slate-500" />
+                <span className="text-[11px] font-semibold text-slate-500">Total Opening:</span>
+              </div>
+              <span className="text-xs font-bold text-slate-700">{totalOpening.toLocaleString()} BDT</span>
             </div>
 
-            {/* Aggregated totals visualization */}
-            <div className="space-y-3 font-mono">
-              <div className="p-3 bg-slate-50 rounded-xl flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <TrendingUp className="w-3.5 h-3.5 text-slate-500" />
-                  <span className="text-[11px] font-semibold text-slate-500">Total Opening:</span>
-                </div>
-                <span className="text-xs font-bold text-slate-700">{totalOpening.toLocaleString()} BDT</span>
+            <div className="p-3.5 bg-emerald-50/50 rounded-xl flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <TrendingUp className="w-3.5 h-3.5 text-emerald-600" />
+                <span className="text-[11px] font-semibold text-emerald-600">Total Collection (Inflow):</span>
               </div>
-
-              <div className="p-3 bg-emerald-50/50 rounded-xl flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <TrendingUp className="w-3.5 h-3.5 text-emerald-600" />
-                  <span className="text-[11px] font-semibold text-emerald-600">Total Collection (Inflow):</span>
-                </div>
-                <span className="text-xs font-extrabold text-emerald-600">+{totalInflow.toLocaleString()} BDT</span>
-              </div>
-
-              <div className="p-3 bg-rose-50/50 rounded-xl flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <TrendingDown className="w-3.5 h-3.5 text-rose-600" />
-                  <span className="text-[11px] font-semibold text-rose-600">Total Expense (Outflow):</span>
-                </div>
-                <span className="text-xs font-extrabold text-rose-600">-{totalOutflow.toLocaleString()} BDT</span>
-              </div>
-
-              <div className="p-3.5 bg-indigo-50 border border-indigo-100 rounded-xl flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <Lock className="w-3.5 h-3.5 text-indigo-600" />
-                  <span className="text-xs font-bold text-indigo-700">Grand Closing:</span>
-                </div>
-                <span className="text-sm font-black text-indigo-800">{totalClosing.toLocaleString()} BDT</span>
-              </div>
+              <span className="text-xs font-extrabold text-emerald-600">+{totalInflow.toLocaleString()} BDT</span>
             </div>
 
+            <div className="p-3.5 bg-rose-50/50 rounded-xl flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <TrendingDown className="w-3.5 h-3.5 text-rose-600" />
+                <span className="text-[11px] font-semibold text-rose-600">Total Expense (Outflow):</span>
+              </div>
+              <span className="text-xs font-extrabold text-rose-600">-{totalOutflow.toLocaleString()} BDT</span>
+            </div>
+
+            <div className="p-3.5 bg-indigo-50 border border-indigo-100 rounded-xl flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <Lock className="w-3.5 h-3.5 text-indigo-600" />
+                <span className="text-xs font-bold text-indigo-700">Grand Closing:</span>
+              </div>
+              <span className="text-sm font-black text-indigo-800">{totalClosing.toLocaleString()} BDT</span>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-5 items-end">
             {/* Notes Input / Display */}
-            {isDateAlreadyClosed ? (
-              activeClosingDoc?.notes ? (
-                <div className="space-y-2">
-                  <label className="text-[11px] font-bold text-slate-500 uppercase tracking-wider block">Special Notes / Comments:</label>
-                  <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-700 font-semibold italic whitespace-pre-wrap">
-                    {activeClosingDoc.notes}
+            <div className="lg:col-span-2">
+              {isDateAlreadyClosed ? (
+                activeClosingDoc?.notes ? (
+                  <div className="space-y-2">
+                    <label className="text-[11px] font-bold text-slate-500 uppercase tracking-wider block">Special Notes / Comments:</label>
+                    <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-700 font-semibold italic whitespace-pre-wrap">
+                      {activeClosingDoc.notes}
+                    </div>
                   </div>
-                </div>
+                ) : (
+                  <div className="space-y-2">
+                    <label className="text-[11px] font-bold text-slate-500 uppercase tracking-wider block">Special Notes / Comments:</label>
+                    <div className="p-3 bg-slate-50 border border-slate-200/50 rounded-xl text-xs text-slate-400 italic font-medium">
+                      No special notes entered for this day.
+                    </div>
+                  </div>
+                )
               ) : (
                 <div className="space-y-2">
-                  <label className="text-[11px] font-bold text-slate-500 uppercase tracking-wider block">Special Notes / Comments:</label>
-                  <div className="p-3 bg-slate-50 border border-slate-200/50 rounded-xl text-xs text-slate-400 italic font-medium">
-                    No special notes entered for this day.
-                  </div>
+                  <label className="text-[11px] font-bold text-slate-500 uppercase tracking-wider block">Special Notes / Comments (Optional):</label>
+                  <textarea 
+                    value={notes}
+                    onChange={(e) => setNotes(e.target.value)}
+                    placeholder="Enter additional details, deposit notes, or daily remarks..."
+                    rows={3}
+                    className="w-full text-xs p-3 border border-slate-200 rounded-xl focus:ring-1 focus:ring-indigo-500 focus:outline-none"
+                  ></textarea>
                 </div>
-              )
-            ) : (
-              <div className="space-y-2">
-                <label className="text-[11px] font-bold text-slate-500 uppercase tracking-wider block">Special Notes / Comments (Optional):</label>
-                <textarea 
-                  value={notes}
-                  onChange={(e) => setNotes(e.target.value)}
-                  placeholder="Enter additional details, deposit notes, or daily remarks..."
-                  rows={3}
-                  className="w-full text-xs p-3 border border-slate-200 rounded-xl focus:ring-1 focus:ring-indigo-500 focus:outline-none"
-                ></textarea>
-              </div>
-            )}
+              )}
+            </div>
 
             {/* Action Buttons */}
             <div className="space-y-3">
               {isDateAlreadyClosed ? (
-                <div className="space-y-3">
-                  <div className="p-4 bg-emerald-50 border border-emerald-200 rounded-xl flex items-center gap-2.5 justify-center">
-                    <CheckCircle className="w-4.5 h-4.5 text-emerald-600" />
-                    <span className="text-[11px] font-bold text-emerald-800 uppercase tracking-wide">Account Successfully Closed & Locked</span>
+                <div className="space-y-2.5">
+                  <div className="p-3.5 bg-emerald-50 border border-emerald-200 rounded-xl flex items-center gap-2 justify-center">
+                    <CheckCircle className="w-4 h-4 text-emerald-600" />
+                    <span className="text-[11px] font-bold text-emerald-800 uppercase tracking-wide">Account Closed & Locked</span>
                   </div>
-                  <button 
-                    type="button"
-                    onClick={handlePrintCurrent}
-                    className="w-full py-2.5 bg-teal-600 hover:bg-teal-700 text-white font-bold rounded-xl text-xs flex items-center justify-center gap-2 transition cursor-pointer shadow-md shadow-teal-600/10"
-                  >
-                    <Printer className="w-4 h-4" />
-                    <span>Print Closing Report</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      const closedDoc = closings.find(c => c.date === selectedDate);
-                      handleReopenClosing(closedDoc ? closedDoc.id : `dc_${userId}_${selectedDate}`, selectedDate);
-                    }}
-                    className="w-full py-2.5 bg-rose-50 hover:bg-rose-100 border border-rose-200 text-rose-700 font-bold rounded-xl text-xs flex items-center justify-center gap-2 transition cursor-pointer"
-                  >
-                    <Unlock className="w-4 h-4" />
-                    <span>Reopen / Unlock Day</span>
-                  </button>
+                  <div className="grid grid-cols-2 gap-2.5">
+                    <button 
+                      type="button"
+                      onClick={handlePrintCurrent}
+                      className="w-full py-2.5 bg-teal-600 hover:bg-teal-700 text-white font-bold rounded-xl text-xs flex items-center justify-center gap-2 transition cursor-pointer shadow-md shadow-teal-600/10"
+                    >
+                      <Printer className="w-4 h-4" />
+                      <span>Print Report</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const closedDoc = closings.find(c => c.date === selectedDate);
+                        handleReopenClosing(closedDoc ? closedDoc.id : `dc_${userId}_${selectedDate}`, selectedDate);
+                      }}
+                      className="w-full py-2.5 bg-rose-50 hover:bg-rose-100 border border-rose-200 text-rose-700 font-bold rounded-xl text-xs flex items-center justify-center gap-2 transition cursor-pointer"
+                    >
+                      <Unlock className="w-4 h-4" />
+                      <span>Unlock Day</span>
+                    </button>
+                  </div>
                 </div>
               ) : (
-                <div className="space-y-3">
+                <div className="space-y-2.5">
                   <button 
                     onClick={handleSaveClosing}
                     className="w-full py-3 bg-indigo-600 hover:bg-indigo-700 text-white font-bold rounded-xl text-xs flex items-center justify-center gap-2 transition cursor-pointer shadow-lg shadow-indigo-600/20"
@@ -3486,6 +5097,522 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile, 
           </div>
         </div>
       )}
+
+      {/* Month Closing Statement Popup Modal */}
+      {activeEntryModal === 'month_closing' && (() => {
+        const monthSummary = getMonthClosingSummary(closingMonth);
+        const latestCashTotal = monthSummary.latestDrawerDoc
+          ? (monthSummary.latestDrawerDoc.khaOfficeCash ?? 0) +
+            (monthSummary.latestDrawerDoc.dhakaOfficeCash ?? 0) +
+            (monthSummary.latestDrawerDoc.nayanCash ?? 0) +
+            (monthSummary.latestDrawerDoc.accountCash ?? 0)
+          : 0;
+
+        return (
+          <div
+            className="fixed inset-0 bg-slate-900/60 backdrop-blur-[2px] z-[90] flex items-center justify-center p-4 overflow-y-auto animate-fade-in"
+            onClick={() => setActiveEntryModal(null)}
+          >
+            <style dangerouslySetInnerHTML={{ __html: `
+              @media print {
+                body * {
+                  visibility: hidden !important;
+                }
+                #printable-month-closing-area, #printable-month-closing-area * {
+                  visibility: visible !important;
+                }
+                #printable-month-closing-area {
+                  position: fixed !important;
+                  left: 0 !important;
+                  top: 0 !important;
+                  width: 100% !important;
+                  height: auto !important;
+                  background: white !important;
+                  color: black !important;
+                  padding: 32px !important;
+                  margin: 0 !important;
+                  box-shadow: none !important;
+                  border: none !important;
+                  z-index: 99999 !important;
+                }
+                .no-print {
+                  display: none !important;
+                }
+              }
+            ` }} />
+            <div
+              className="bg-white rounded-3xl max-w-4xl w-full p-5 sm:p-6 shadow-2xl relative overflow-hidden animate-scale-up border border-slate-100 my-8 max-h-[90vh] flex flex-col"
+              onClick={(e) => e.stopPropagation()}
+            >
+              {/* Modal Header */}
+              <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 pb-4 mb-5 shrink-0 no-print">
+                <div className="flex items-center gap-3">
+                  <span className="p-2.5 bg-teal-50 text-teal-600 rounded-xl">
+                    <Calendar className="w-5 h-5" />
+                  </span>
+                  <div>
+                    <h3 className="text-base font-extrabold text-slate-800">Month Closing Statement</h3>
+                    <p className="text-[11px] text-slate-400 mt-0.5 font-mono">
+                      Monthly Opening, Income, Expense &amp; Closing Overview • {monthSummary.closedDaysCount} Closed Days
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <div className="bg-slate-50 border border-slate-200 rounded-xl px-3 py-1.5 flex items-center gap-2">
+                    <Calendar className="w-3.5 h-3.5 text-teal-600" />
+                    <input
+                      type="month"
+                      value={closingMonth}
+                      onChange={(e) => setClosingMonth(e.target.value)}
+                      className="bg-transparent text-slate-800 font-mono text-xs font-bold focus:outline-none cursor-pointer"
+                    />
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setActiveEntryModal(null)}
+                    className="p-1.5 text-slate-400 hover:text-slate-600 rounded-lg hover:bg-slate-100 transition cursor-pointer"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                </div>
+              </div>
+
+              {/* Scrollable Printable Body */}
+              <div id="printable-month-closing-area" className="flex-1 overflow-y-auto pr-1 space-y-5">
+                <div className="hidden print:block text-center border-b border-dashed border-slate-300 pb-4 mb-4">
+                  <h1 className="text-base font-bold tracking-wider text-slate-900 uppercase">Titas Internet &amp; Accounting</h1>
+                  <p className="text-[10px] text-slate-500 font-medium mt-1 uppercase tracking-widest">
+                    Month Closing Statement • {monthSummary.month}
+                  </p>
+                </div>
+
+                {/* 4 Monthly Summary Tiles */}
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 font-mono">
+                  <div className="p-3.5 bg-slate-50 border border-slate-200/70 rounded-2xl">
+                    <span className="text-[10px] font-bold text-slate-400 uppercase block">Month Opening</span>
+                    <span className="text-sm font-black text-slate-800 mt-1 block">{monthSummary.totalOpen.toLocaleString()} ৳</span>
+                  </div>
+                  <div className="p-3.5 bg-emerald-50/70 border border-emerald-100 rounded-2xl">
+                    <span className="text-[10px] font-bold text-emerald-700 uppercase block">Month Income ({monthSummary.incomeCount})</span>
+                    <span className="text-sm font-black text-emerald-700 mt-1 block">+{monthSummary.totalIncome.toLocaleString()} ৳</span>
+                  </div>
+                  <div className="p-3.5 bg-rose-50/70 border border-rose-100 rounded-2xl">
+                    <span className="text-[10px] font-bold text-rose-700 uppercase block">Month Expense ({monthSummary.expenseCount})</span>
+                    <span className="text-sm font-black text-rose-700 mt-1 block">-{monthSummary.totalExpense.toLocaleString()} ৳</span>
+                  </div>
+                  <div className="p-3.5 bg-teal-50 border border-teal-200 rounded-2xl">
+                    <span className="text-[10px] font-bold text-teal-700 uppercase block">Month Closing</span>
+                    <span className="text-sm font-black text-teal-900 mt-1 block">{monthSummary.totalClose.toLocaleString()} ৳</span>
+                  </div>
+                </div>
+
+                {/* Payment Method Breakdown Table for the Month */}
+                <div className="bg-slate-50/50 rounded-2xl p-4 border border-slate-200/60">
+                  <h4 className="text-xs font-black text-slate-700 uppercase tracking-wider mb-3 pb-2 border-b border-slate-200 flex items-center justify-between">
+                    <span>Payment Method Monthly Breakdown ({monthSummary.month})</span>
+                    <span className="text-[10px] font-bold text-slate-400">BDT</span>
+                  </h4>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left border-collapse text-xs">
+                      <thead>
+                        <tr className="border-b border-slate-200 text-[10px] font-bold text-slate-400 uppercase tracking-wider">
+                          <th className="py-2 px-1.5 sm:px-2.5">Payment Method</th>
+                          <th className="py-2 px-1.5 sm:px-2.5 text-right">Opening</th>
+                          <th className="py-2 px-1.5 sm:px-2.5 text-right">Income (+)</th>
+                          <th className="py-2 px-1.5 sm:px-2.5 text-right">Expense (-)</th>
+                          <th className="py-2 px-1.5 sm:px-2.5 text-right">Closing</th>
+                          <th className="py-2 px-1.5 sm:px-2.5 text-right">P/L</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-200/60">
+                        {monthSummary.methods.map((row) => (
+                          <tr key={row.key} className="hover:bg-white transition">
+                            <td className="py-2 px-1.5 sm:px-2.5 font-bold text-slate-700 flex items-center gap-2 whitespace-nowrap">
+                              <PaymentMethodLogo method={row.key} className="w-5 h-5 shrink-0" />
+                              <span>{row.label}</span>
+                            </td>
+                            <td className="py-2 px-1.5 sm:px-2.5 text-right font-mono text-slate-600 whitespace-nowrap">{row.open.toLocaleString()}</td>
+                            <td className="py-2 px-1.5 sm:px-2.5 text-right font-mono font-bold text-emerald-600 whitespace-nowrap">+{row.income.toLocaleString()}</td>
+                            <td className="py-2 px-1.5 sm:px-2.5 text-right font-mono font-bold text-rose-600 whitespace-nowrap">-{row.expense.toLocaleString()}</td>
+                            <td className="py-2 px-1.5 sm:px-2.5 text-right font-mono font-extrabold text-slate-900 whitespace-nowrap">{row.close.toLocaleString()}</td>
+                            <td className={`py-2 px-1.5 sm:px-2.5 text-right font-mono font-extrabold whitespace-nowrap ${row.pl > 0 ? 'text-emerald-600' : row.pl < 0 ? 'text-rose-600' : 'text-slate-500'}`}>
+                              {row.pl > 0 ? `+${row.pl.toLocaleString()}` : row.pl < 0 ? `-${Math.abs(row.pl).toLocaleString()}` : '0'}
+                            </td>
+                          </tr>
+                        ))}
+                        <tr className="bg-slate-100/80 font-extrabold">
+                          <td className="py-2 px-1.5 sm:px-2.5 text-slate-800 whitespace-nowrap">Total</td>
+                          <td className="py-2 px-1.5 sm:px-2.5 text-right font-mono text-slate-700 whitespace-nowrap">{monthSummary.totalOpen.toLocaleString()}</td>
+                          <td className="py-2 px-1.5 sm:px-2.5 text-right font-mono text-emerald-600 whitespace-nowrap">+{monthSummary.totalIncome.toLocaleString()}</td>
+                          <td className="py-2 px-1.5 sm:px-2.5 text-right font-mono text-rose-600 whitespace-nowrap">-{monthSummary.totalExpense.toLocaleString()}</td>
+                          <td className="py-2 px-1.5 sm:px-2.5 text-right font-mono text-slate-900 whitespace-nowrap">{monthSummary.totalClose.toLocaleString()}</td>
+                          <td className={`py-2 px-1.5 sm:px-2.5 text-right font-mono whitespace-nowrap ${monthSummary.totalPL > 0 ? 'text-emerald-600' : monthSummary.totalPL < 0 ? 'text-rose-600' : 'text-slate-600'}`}>
+                            {monthSummary.totalPL > 0 ? `+${monthSummary.totalPL.toLocaleString()}` : monthSummary.totalPL < 0 ? `-${Math.abs(monthSummary.totalPL).toLocaleString()}` : '0'}
+                          </td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+
+                {/* Cash Details Snapshot & Monthly Transfers */}
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div className="bg-slate-50/50 rounded-2xl p-4 border border-slate-200/60">
+                    <h4 className="text-[11px] font-black text-indigo-950 uppercase tracking-wider mb-3 pb-1.5 border-b border-slate-200 flex items-center justify-between">
+                      <span>Latest Physical Cash</span>
+                      <span className="text-[10px] font-mono text-slate-400">
+                        {monthSummary.latestDrawerDoc ? monthSummary.latestDrawerDoc.date : 'No Entry'}
+                      </span>
+                    </h4>
+                    <div className="space-y-1.5 text-xs">
+                      <div className="flex justify-between py-0.5">
+                        <span className="text-slate-500">KHA Office Cash</span>
+                        <span className="font-mono font-bold text-slate-800">{(monthSummary.latestDrawerDoc?.khaOfficeCash ?? 0).toLocaleString()} ৳</span>
+                      </div>
+                      <div className="flex justify-between py-0.5">
+                        <span className="text-slate-500">Dhaka Office Cash</span>
+                        <span className="font-mono font-bold text-slate-800">{(monthSummary.latestDrawerDoc?.dhakaOfficeCash ?? 0).toLocaleString()} ৳</span>
+                      </div>
+                      <div className="flex justify-between py-0.5">
+                        <span className="text-slate-500">Nayan Cash</span>
+                        <span className="font-mono font-bold text-slate-800">{(monthSummary.latestDrawerDoc?.nayanCash ?? 0).toLocaleString()} ৳</span>
+                      </div>
+                      <div className="flex justify-between py-0.5">
+                        <span className="text-slate-500">Account Cash</span>
+                        <span className="font-mono font-bold text-slate-800">{(monthSummary.latestDrawerDoc?.accountCash ?? 0).toLocaleString()} ৳</span>
+                      </div>
+                      <div className="flex justify-between pt-2 mt-1 border-t border-slate-200 font-bold text-indigo-700">
+                        <span>Total Physical Cash</span>
+                        <span className="font-mono">{latestCashTotal.toLocaleString()} ৳</span>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="bg-slate-50/50 rounded-2xl p-4 border border-slate-200/60">
+                    <h4 className="text-[11px] font-black text-slate-700 uppercase tracking-wider mb-3 pb-1.5 border-b border-slate-200 flex items-center justify-between">
+                      <span>Monthly Cash Transfers</span>
+                      <span className="text-[10px] font-mono text-slate-400">{monthSummary.month}</span>
+                    </h4>
+                    <div className="space-y-1.5 text-xs">
+                      <div className="flex justify-between py-0.5">
+                        <span className="text-slate-500">KHA Office to Nayan</span>
+                        <span className="font-mono font-bold text-slate-800">{monthSummary.transfers.khaToNayan.toLocaleString()} ৳</span>
+                      </div>
+                      <div className="flex justify-between py-0.5">
+                        <span className="text-slate-500">Nayan to Dhaka office</span>
+                        <span className="font-mono font-bold text-slate-800">{monthSummary.transfers.nayanToDhaka.toLocaleString()} ৳</span>
+                      </div>
+                      <div className="flex justify-between py-0.5">
+                        <span className="text-slate-500">Dhaka office to Nayan</span>
+                        <span className="font-mono font-bold text-slate-800">{monthSummary.transfers.dhakaToNayan.toLocaleString()} ৳</span>
+                      </div>
+                      <div className="flex justify-between py-0.5">
+                        <span className="text-slate-500">Dhaka office to KHA Office</span>
+                        <span className="font-mono font-bold text-slate-800">{monthSummary.transfers.dhakaToKha.toLocaleString()} ৳</span>
+                      </div>
+                      <div className="flex justify-between pt-2 mt-1 border-t border-slate-200 font-bold text-slate-700">
+                        <span>Total Transfers</span>
+                        <span className="font-mono">{monthSummary.transfers.total.toLocaleString()} ৳</span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Category-Wise Income & P/L Statement (Left) + Category-Wise Expense Statement (Right) */}
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 items-start">
+                  <div className="space-y-4">
+                    <div className="bg-emerald-50/30 rounded-2xl p-4 border border-emerald-200/70">
+                      <h4 className="text-[11px] font-black text-emerald-800 uppercase tracking-wider mb-3 pb-1.5 border-b border-emerald-200/80 flex items-center justify-between">
+                        <span>Category-Wise Income Statement</span>
+                        <span className="text-[10px] font-mono text-emerald-600">{monthSummary.month}</span>
+                      </h4>
+                      <div className="space-y-1.5 text-xs">
+                        {monthSummary.incomeCategories.map((cat) => (
+                          <div key={cat.key} className="flex items-center justify-between py-0.5 gap-2">
+                            <span className="text-slate-600 flex items-center gap-1.5">
+                              <span>{cat.label}</span>
+                              {cat.count > 0 && (
+                                <span className="text-[10px] font-mono font-bold text-emerald-700 bg-emerald-100/80 px-1.5 py-0.5 rounded">
+                                  {cat.count}
+                                </span>
+                              )}
+                            </span>
+                            <span className={`font-mono font-bold ${cat.amount > 0 ? 'text-emerald-600' : 'text-slate-400'}`}>
+                              +{cat.amount.toLocaleString()} ৳
+                            </span>
+                          </div>
+                        ))}
+                        <div className="flex justify-between pt-2 mt-1 border-t border-emerald-200/80 font-extrabold text-emerald-800">
+                          <span>Total Category Income</span>
+                          <span className="font-mono">+{monthSummary.totalIncome.toLocaleString()} ৳</span>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* P/L Statement Card directly under Category-Wise Income Statement */}
+                    <div className={`rounded-2xl p-4 border ${monthSummary.totalPL > 0 ? 'bg-teal-50/40 border-teal-200/80' : monthSummary.totalPL < 0 ? 'bg-rose-50/40 border-rose-200/80' : 'bg-slate-50/60 border-slate-200/70'}`}>
+                      <h4 className="text-[11px] font-black text-slate-800 uppercase tracking-wider mb-3 pb-1.5 border-b border-slate-200/80 flex items-center justify-between">
+                        <span>P/L Statement (Profit &amp; Loss)</span>
+                        <span className={`text-[10px] font-mono font-extrabold px-2 py-0.5 rounded ${monthSummary.totalPL > 0 ? 'bg-emerald-100 text-emerald-700' : monthSummary.totalPL < 0 ? 'bg-rose-100 text-rose-700' : 'bg-slate-200 text-slate-600'}`}>
+                          {monthSummary.totalPL > 0 ? 'PROFIT' : monthSummary.totalPL < 0 ? 'LOSS' : 'BREAK-EVEN'}
+                        </span>
+                      </h4>
+                      <div className="space-y-1.5 text-xs">
+                        <div className="flex justify-between py-0.5">
+                          <span className="text-slate-600">Total Income ({monthSummary.incomeCount})</span>
+                          <span className="font-mono font-bold text-emerald-600">+{monthSummary.totalIncome.toLocaleString()} ৳</span>
+                        </div>
+                        <div className="flex justify-between py-0.5">
+                          <span className="text-slate-600">Total Expense ({monthSummary.expenseCount})</span>
+                          <span className="font-mono font-bold text-rose-600">-{monthSummary.totalExpense.toLocaleString()} ৳</span>
+                        </div>
+                        <div className="flex justify-between py-0.5">
+                          <span className="text-slate-500">Profit Margin</span>
+                          <span className="font-mono font-bold text-slate-700">
+                            {monthSummary.totalIncome > 0 ? `${((monthSummary.totalPL / monthSummary.totalIncome) * 100).toFixed(1)}%` : '0.0%'}
+                          </span>
+                        </div>
+                        <div className={`flex justify-between pt-2 mt-1 border-t border-slate-200/80 font-extrabold ${monthSummary.totalPL > 0 ? 'text-emerald-700' : monthSummary.totalPL < 0 ? 'text-rose-700' : 'text-slate-800'}`}>
+                          <span>Net Profit / Loss (P/L)</span>
+                          <span className="font-mono">
+                            {monthSummary.totalPL > 0 ? `+${monthSummary.totalPL.toLocaleString()} ৳` : monthSummary.totalPL < 0 ? `-${Math.abs(monthSummary.totalPL).toLocaleString()} ৳` : '0 ৳'}
+                          </span>
+                        </div>
+                        <div className="flex justify-between pt-1 text-[11px] text-slate-500">
+                          <span>Closing (Opening {monthSummary.totalOpen.toLocaleString()} + P/L)</span>
+                          <span className="font-mono font-bold text-slate-800">{monthSummary.totalClose.toLocaleString()} ৳</span>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Manual Due Amount Entry Card directly under P/L Statement */}
+                    <div className="bg-amber-50/40 rounded-2xl p-4 border border-amber-200/80">
+                      <h4 className="text-[11px] font-black text-amber-900 uppercase tracking-wider mb-3 pb-1.5 border-b border-amber-200/80 flex items-center justify-between">
+                        <span>Manual Due Amount ({monthSummary.month})</span>
+                        <span className="font-mono text-xs font-extrabold text-amber-700">
+                          {monthSummary.dueAmount.toLocaleString()} ৳
+                        </span>
+                      </h4>
+                      <div className="space-y-2.5">
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                          <div>
+                            <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wide block mb-1">
+                              Due Amount (BDT)
+                            </label>
+                            <input
+                              type="number"
+                              min="0"
+                              step="any"
+                              placeholder="0"
+                              value={dueAmountInput}
+                              onChange={(e) => setDueAmountInput(e.target.value)}
+                              className="w-full px-3 py-2 bg-white border border-amber-200 rounded-xl text-xs font-mono font-bold text-slate-800 focus:outline-none focus:ring-2 focus:ring-amber-500/30 focus:border-amber-400"
+                            />
+                          </div>
+                          <div>
+                            <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wide block mb-1">
+                              Due Note (Optional)
+                            </label>
+                            <input
+                              type="text"
+                              placeholder="e.g. Pending customer bill"
+                              value={dueNotesInput}
+                              onChange={(e) => setDueNotesInput(e.target.value)}
+                              className="w-full px-3 py-2 bg-white border border-amber-200 rounded-xl text-xs font-medium text-slate-700 focus:outline-none focus:ring-2 focus:ring-amber-500/30 focus:border-amber-400"
+                            />
+                          </div>
+                        </div>
+
+                        <div className="flex items-center justify-between gap-2 pt-0.5">
+                          <div className="text-[10px] font-semibold text-slate-500">
+                            {dueSaveSuccess ? (
+                              <span className="text-emerald-600 font-bold flex items-center gap-1">
+                                <CheckCircle className="w-3.5 h-3.5" />
+                                <span>Due amount saved</span>
+                              </span>
+                            ) : monthSummary.dueNotes ? (
+                              <span className="text-slate-600">Note: {monthSummary.dueNotes}</span>
+                            ) : (
+                              <span>Saved per month ({monthSummary.month})</span>
+                            )}
+                          </div>
+                          <div className="flex items-center gap-1.5">
+                            {monthSummary.dueAmount > 0 && (
+                              <button
+                                type="button"
+                                disabled={savingDue}
+                                onClick={() => {
+                                  setDueAmountInput('');
+                                  setDueNotesInput('');
+                                  handleSaveMonthlyDue(0, '');
+                                }}
+                                className="px-2.5 py-1.5 bg-white hover:bg-rose-50 text-rose-600 border border-rose-200 rounded-lg text-[11px] font-bold transition cursor-pointer disabled:opacity-50"
+                              >
+                                Clear
+                              </button>
+                            )}
+                            <button
+                              type="button"
+                              disabled={savingDue}
+                              onClick={() => handleSaveMonthlyDue()}
+                              className="px-3.5 py-1.5 bg-amber-600 hover:bg-amber-700 text-white rounded-lg text-[11px] font-extrabold transition cursor-pointer shadow-sm shadow-amber-600/20 disabled:opacity-50"
+                            >
+                              {savingDue ? 'Saving...' : 'Save Due'}
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Manual Discount Entry Card directly under Manual Due Amount */}
+                    <div className="bg-violet-50/40 rounded-2xl p-4 border border-violet-200/80">
+                      <h4 className="text-[11px] font-black text-violet-900 uppercase tracking-wider mb-3 pb-1.5 border-b border-violet-200/80 flex items-center justify-between">
+                        <span>Discount ({monthSummary.month})</span>
+                        <span className="font-mono text-xs font-extrabold text-violet-700">
+                          {monthSummary.discountAmount.toLocaleString()} ৳
+                        </span>
+                      </h4>
+                      <div className="space-y-2.5">
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                          <div>
+                            <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wide block mb-1">
+                              Discount Amount (BDT)
+                            </label>
+                            <input
+                              type="number"
+                              min="0"
+                              step="any"
+                              placeholder="0"
+                              value={discountAmountInput}
+                              onChange={(e) => setDiscountAmountInput(e.target.value)}
+                              className="w-full px-3 py-2 bg-white border border-violet-200 rounded-xl text-xs font-mono font-bold text-slate-800 focus:outline-none focus:ring-2 focus:ring-violet-500/30 focus:border-violet-400"
+                            />
+                          </div>
+                          <div>
+                            <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wide block mb-1">
+                              Discount Note (Optional)
+                            </label>
+                            <input
+                              type="text"
+                              placeholder="e.g. Customer bill discount"
+                              value={discountNotesInput}
+                              onChange={(e) => setDiscountNotesInput(e.target.value)}
+                              className="w-full px-3 py-2 bg-white border border-violet-200 rounded-xl text-xs font-medium text-slate-700 focus:outline-none focus:ring-2 focus:ring-violet-500/30 focus:border-violet-400"
+                            />
+                          </div>
+                        </div>
+
+                        <div className="flex items-center justify-between gap-2 pt-0.5">
+                          <div className="text-[10px] font-semibold text-slate-500">
+                            {discountSaveSuccess ? (
+                              <span className="text-emerald-600 font-bold flex items-center gap-1">
+                                <CheckCircle className="w-3.5 h-3.5" />
+                                <span>Discount saved</span>
+                              </span>
+                            ) : monthSummary.discountNotes ? (
+                              <span className="text-slate-600">Note: {monthSummary.discountNotes}</span>
+                            ) : (
+                              <span>Saved per month ({monthSummary.month})</span>
+                            )}
+                          </div>
+                          <div className="flex items-center gap-1.5">
+                            {monthSummary.discountAmount > 0 && (
+                              <button
+                                type="button"
+                                disabled={savingDiscount}
+                                onClick={() => {
+                                  setDiscountAmountInput('');
+                                  setDiscountNotesInput('');
+                                  handleSaveMonthlyDiscount(0, '');
+                                }}
+                                className="px-2.5 py-1.5 bg-white hover:bg-rose-50 text-rose-600 border border-rose-200 rounded-lg text-[11px] font-bold transition cursor-pointer disabled:opacity-50"
+                              >
+                                Clear
+                              </button>
+                            )}
+                            <button
+                              type="button"
+                              disabled={savingDiscount}
+                              onClick={() => handleSaveMonthlyDiscount()}
+                              className="px-3.5 py-1.5 bg-violet-600 hover:bg-violet-700 text-white rounded-lg text-[11px] font-extrabold transition cursor-pointer shadow-sm shadow-violet-600/20 disabled:opacity-50"
+                            >
+                              {savingDiscount ? 'Saving...' : 'Save Discount'}
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="bg-rose-50/30 rounded-2xl p-4 border border-rose-200/70">
+                    <h4 className="text-[11px] font-black text-rose-800 uppercase tracking-wider mb-3 pb-1.5 border-b border-rose-200/80 flex items-center justify-between">
+                      <span>Category-Wise Expense Statement</span>
+                      <span className="text-[10px] font-mono text-rose-600">{monthSummary.month}</span>
+                    </h4>
+                    <div className="space-y-1.5 text-xs">
+                      {monthSummary.expenseCategories.map((cat) => (
+                        <div key={cat.key} className="flex items-center justify-between py-0.5 gap-2">
+                          <span className="text-slate-600 flex items-center gap-1.5">
+                            <span>{cat.label}</span>
+                            {cat.count > 0 && (
+                              <span className="text-[10px] font-mono font-bold text-rose-700 bg-rose-100/80 px-1.5 py-0.5 rounded">
+                                {cat.count}
+                              </span>
+                            )}
+                          </span>
+                          <span className={`font-mono font-bold ${cat.amount > 0 ? 'text-rose-600' : 'text-slate-400'}`}>
+                            -{cat.amount.toLocaleString()} ৳
+                          </span>
+                        </div>
+                      ))}
+                      <div className="flex justify-between pt-2 mt-1 border-t border-rose-200/80 font-extrabold text-rose-800">
+                        <span>Total Category Expense</span>
+                        <span className="font-mono">-{monthSummary.totalExpense.toLocaleString()} ৳</span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Footer Actions */}
+              <div className="flex flex-wrap items-center justify-end gap-2.5 pt-4 mt-4 border-t border-slate-100 shrink-0 no-print">
+                <button
+                  type="button"
+                  onClick={() => handlePrintMonthClosingStatement(closingMonth)}
+                  className="px-4 py-2.5 bg-teal-600 hover:bg-teal-700 text-white text-xs font-extrabold rounded-xl flex items-center gap-2 transition cursor-pointer shadow-sm shadow-teal-600/20"
+                >
+                  <Printer className="w-4 h-4" />
+                  <span>Print Statement</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleDownloadMonthClosingExcel(closingMonth)}
+                  className="px-4 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-extrabold rounded-xl flex items-center gap-2 transition cursor-pointer shadow-sm shadow-emerald-600/20"
+                >
+                  <FileSpreadsheet className="w-4 h-4" />
+                  <span>Download Excel</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleDownloadMonthClosingPDF(closingMonth)}
+                  className="px-4 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-extrabold rounded-xl flex items-center gap-2 transition cursor-pointer shadow-sm shadow-indigo-600/20"
+                >
+                  <FileDown className="w-4 h-4" />
+                  <span>Download PDF</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setActiveEntryModal(null)}
+                  className="py-2.5 px-5 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold rounded-xl transition cursor-pointer"
+                >
+                  Close
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
 
       {/* Inline Print Preview Modal */}
       {renderPrintPreviewModal()}

@@ -236,9 +236,21 @@
           "type": "string",
           "description": "Base64 encoded file content of the voucher"
         },
+        "paymentMethod": {
+          "type": "string",
+          "description": "Payment method used for the voucher"
+        },
         "transportLogs": {
           "type": "array",
           "description": "Optional list of transport paths and fees if category is transport"
+        },
+        "items": {
+          "type": "array",
+          "description": "Optional list of voucher line items"
+        },
+        "salaryLogs": {
+          "type": "array",
+          "description": "Optional list of employee salary breakdown entries if category is salary"
         },
         "createdAt": {
           "type": "string"
@@ -380,6 +392,24 @@
         }
       },
       "required": ["id", "userId", "date", "openingCash", "openingBkash", "openingNagad", "openingRocket", "openingBank", "openingSsl", "closingCash", "closingBkash", "closingNagad", "closingRocket", "closingBank", "closingSsl", "totalCashIn", "totalBkashIn", "totalNagadIn", "totalRocketIn", "totalBankIn", "totalSslIn", "totalCashOut", "totalBkashOut", "totalNagadOut", "totalRocketOut", "totalBankOut", "totalSslOut", "status", "createdAt", "updatedAt"]
+    },
+    "MonthlyDue": {
+      "title": "MonthlyDue",
+      "description": "Manual due amount and discount entries recorded per closing month (YYYY-MM)",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 32 },
+        "userId": { "type": "string" },
+        "month": { "type": "string", "pattern": "^\\d{4}-\\d{2}$" },
+        "dueAmount": { "type": "number" },
+        "notes": { "type": "string", "maxLength": 500 },
+        "discountAmount": { "type": "number" },
+        "discountNotes": { "type": "string", "maxLength": 500 },
+        "updatedBy": { "type": "string", "maxLength": 150 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "userId", "month", "dueAmount", "updatedAt"]
     }
   },
   "firestore": {
@@ -402,6 +432,10 @@
     "/daily_closings/{dailyClosingId}": {
       "schema": "DailyClosing",
       "description": "Daily audit closure configurations for all payment assets"
+    },
+    "/monthly_dues/{monthId}": {
+      "schema": "MonthlyDue",
+      "description": "Manual due amount records per closing month"
     },
     "/notifications/{notificationId}": {
       "schema": "Notification",

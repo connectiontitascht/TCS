@@ -129,16 +129,25 @@ service cloud.firestore {
     // Schema Validation Helper for Vouchers
     function isValidVoucher(data) {
       return (
-        data.size() >= 10 && data.size() <= 20 &&
+        data.size() >= 10 && data.size() <= 28 &&
         'id' in data && 'userId' in data && 'title' in data && 'amount' in data && 'category' in data && 'date' in data && 'submittedBy' in data && 'status' in data && 'createdAt' in data && 'updatedAt' in data &&
         
         (!('notes' in data) || (data.notes is string && data.notes.size() <= 1000)) &&
         (!('rejectionReason' in data) || (data.rejectionReason is string && data.rejectionReason.size() <= 1000)) &&
+        (!('paymentMethod' in data) || (data.paymentMethod is string && data.paymentMethod.size() <= 100)) &&
         (!('attachmentName' in data) || (data.attachmentName is string && data.attachmentName.size() <= 300)) &&
         (!('attachmentData' in data) || data.attachmentData is string) &&
         (!('transportLogs' in data) || (
           data.transportLogs is list && 
           data.transportLogs.size() <= 100
+        )) &&
+        (!('items' in data) || (
+          data.items is list && 
+          data.items.size() <= 100
+        )) &&
+        (!('salaryLogs' in data) || (
+          data.salaryLogs is list && 
+          data.salaryLogs.size() <= 100
         )) &&
 
         data.id is string && data.id.size() <= 128 &&
@@ -321,7 +330,7 @@ service cloud.firestore {
         && (incoming().userId == existing().userId || isAdmin())
         && incoming().createdAt == existing().createdAt
         && incoming().updatedAt == request.time
-        && incoming().diff(existing()).affectedKeys().hasOnly(['title', 'amount', 'category', 'date', 'submittedBy', 'status', 'notes', 'transportLogs', 'rejectionReason', 'attachmentName', 'attachmentData', 'updatedAt']);
+        && incoming().diff(existing()).affectedKeys().hasOnly(['title', 'amount', 'category', 'date', 'submittedBy', 'paymentMethod', 'status', 'notes', 'transportLogs', 'items', 'salaryLogs', 'rejectionReason', 'attachmentName', 'attachmentData', 'updatedAt']);
 
       allow delete: if isSignedIn()
         && isValidId(voucherId)
@@ -350,6 +359,30 @@ service cloud.firestore {
       allow delete: if isSignedIn()
         && isValidId(dailyClosingId)
         && (resource == null || resource.data.userId == request.auth.uid || isAdmin());
+    }
+
+    // Match patterns for monthly dues & discounts (ম্যানুয়াল ডিউ এবং ডিসকাউন্ট এন্ট্রি)
+    function isValidMonthlyDue(data) {
+      return (
+        data.size() >= 5 && data.size() <= 12 &&
+        'id' in data && 'userId' in data && 'month' in data && 'dueAmount' in data && 'updatedAt' in data &&
+        data.id is string && data.id.size() <= 32 &&
+        data.userId is string && (data.userId == request.auth.uid || isAdmin()) &&
+        data.month is string && data.month.size() == 7 && data.month.matches('^\\d{4}-\\d{2}$') &&
+        (data.dueAmount is int || data.dueAmount is float) && data.dueAmount >= 0 &&
+        (!('notes' in data) || (data.notes is string && data.notes.size() <= 500)) &&
+        (!('discountAmount' in data) || ((data.discountAmount is int || data.discountAmount is float) && data.discountAmount >= 0)) &&
+        (!('discountNotes' in data) || (data.discountNotes is string && data.discountNotes.size() <= 500)) &&
+        (!('updatedBy' in data) || (data.updatedBy is string && data.updatedBy.size() <= 150)) &&
+        (!('createdAt' in data) || (data.createdAt is timestamp || data.createdAt == request.time)) &&
+        (data.updatedAt is timestamp || data.updatedAt == request.time)
+      );
+    }
+
+    match /monthly_dues/{monthId} {
+      allow get, list: if isSignedIn();
+      allow create, update: if isSignedIn() && isValidId(monthId) && isValidMonthlyDue(incoming());
+      allow delete: if isSignedIn() && isValidId(monthId) && isAdmin();
     }
 
     // Match patterns for notifications

@@ -32,7 +32,7 @@ import {
   serverTimestamp 
 } from 'firebase/firestore';
 import { db, handleFirestoreError, OperationType } from '../firebase';
-import { Voucher, Transaction, EXPENSE_CATEGORY_LABELS, AppUser } from '../types';
+import { Voucher, Transaction, EXPENSE_CATEGORY_LABELS, AppUser, SalaryLog } from '../types';
 import { PaymentMethodLogo } from './PaymentLogos';
 
 interface VoucherSectionProps {
@@ -40,6 +40,11 @@ interface VoucherSectionProps {
   onAddTransaction: (transaction: Omit<Transaction, 'id'>) => Promise<void>;
   currentUserProfile?: AppUser | null;
 }
+
+const isBillMonthCategory = (cat: string) => cat === 'bandwidth_bill' || cat === 'software_bill';
+const toSalaryNum = (v: string) => Math.max(0, Number(v) || 0);
+const calcSalaryTotal = (basic: string, house: string, med: string, trans: string, ot: string, mob: string) =>
+  toSalaryNum(basic) + toSalaryNum(house) + toSalaryNum(med) + toSalaryNum(trans) + toSalaryNum(ot) + toSalaryNum(mob);
 
 export function VoucherSection({ userId, onAddTransaction, currentUserProfile }: VoucherSectionProps) {
   const [vouchers, setVouchers] = useState<Voucher[]>([]);
@@ -129,10 +134,11 @@ export function VoucherSection({ userId, onAddTransaction, currentUserProfile }:
   const [editNotes, setEditNotes] = useState('');
   const [editAttachmentName, setEditAttachmentName] = useState('');
   const [editAttachmentData, setEditAttachmentData] = useState('');
-  const [editTransportLogs, setEditTransportLogs] = useState<{ fromLocation: string; toLocation: string; reason: string; amount: number }[]>([]);
+  const [editTransportLogs, setEditTransportLogs] = useState<{ fromLocation: string; toLocation: string; reason: string; person?: string; amount: number }[]>([]);
   const [editFromLoc, setEditFromLoc] = useState('');
   const [editToLoc, setEditToLoc] = useState('');
   const [editTReason, setEditTReason] = useState('');
+  const [editTPerson, setEditTPerson] = useState('');
   const [editTAmount, setEditTAmount] = useState('');
   const [editError, setEditError] = useState('');
 
@@ -142,6 +148,37 @@ export function VoucherSection({ userId, onAddTransaction, currentUserProfile }:
   const [editItemUom, setEditItemUom] = useState('Pcs');
   const [editItemQty, setEditItemQty] = useState('');
   const [editItemAmt, setEditItemAmt] = useState('');
+
+  // Edit Salary state
+  const [editSalaryLogs, setEditSalaryLogs] = useState<SalaryLog[]>([]);
+  const [editSalEmpName, setEditSalEmpName] = useState('');
+  const [editSalMonth, setEditSalMonth] = useState('');
+  const [editSalBasic, setEditSalBasic] = useState('');
+  const [editSalHouseRent, setEditSalHouseRent] = useState('');
+  const [editSalMedical, setEditSalMedical] = useState('');
+  const [editSalTransport, setEditSalTransport] = useState('');
+  const [editSalOvertime, setEditSalOvertime] = useState('');
+  const [editSalMobileBill, setEditSalMobileBill] = useState('');
+
+  const currentEditSalaryDraftTotal = calcSalaryTotal(
+    editSalBasic,
+    editSalHouseRent,
+    editSalMedical,
+    editSalTransport,
+    editSalOvertime,
+    editSalMobileBill
+  );
+
+  useEffect(() => {
+    if (editingVoucher && editCategory === 'salary') {
+      if (editSalaryLogs.length > 0) {
+        const sum = editSalaryLogs.reduce((acc, item) => acc + item.totalAmount, 0);
+        setEditAmount(sum.toString());
+      } else {
+        setEditAmount(currentEditSalaryDraftTotal > 0 ? currentEditSalaryDraftTotal.toString() : '0');
+      }
+    }
+  }, [editingVoucher, editCategory, editSalaryLogs, currentEditSalaryDraftTotal]);
 
   // Start Editing Handler
   const handleStartEdit = (voucher: Voucher) => {
@@ -160,14 +197,24 @@ export function VoucherSection({ userId, onAddTransaction, currentUserProfile }:
     setEditAttachmentData(voucher.attachmentData || '');
     setEditTransportLogs(voucher.transportLogs || []);
     setEditVoucherItems(voucher.items || []);
+    setEditSalaryLogs(voucher.salaryLogs || []);
     setEditFromLoc('');
     setEditToLoc('');
     setEditTReason('');
+    setEditTPerson('');
     setEditTAmount('');
     setEditItemDesc('');
     setEditItemUom('Pcs');
     setEditItemQty('');
     setEditItemAmt('');
+    setEditSalEmpName('');
+    setEditSalMonth('');
+    setEditSalBasic('');
+    setEditSalHouseRent('');
+    setEditSalMedical('');
+    setEditSalTransport('');
+    setEditSalOvertime('');
+    setEditSalMobileBill('');
     setEditError('');
   };
 
@@ -188,6 +235,7 @@ export function VoucherSection({ userId, onAddTransaction, currentUserProfile }:
       fromLocation: editFromLoc.trim(),
       toLocation: editToLoc.trim(),
       reason: editTReason.trim(),
+      person: editTPerson.trim(),
       amount: val
     };
 
@@ -200,6 +248,7 @@ export function VoucherSection({ userId, onAddTransaction, currentUserProfile }:
     setEditFromLoc('');
     setEditToLoc('');
     setEditTReason('');
+    setEditTPerson('');
     setEditTAmount('');
   };
 
@@ -215,25 +264,33 @@ export function VoucherSection({ userId, onAddTransaction, currentUserProfile }:
   // Add Item to universal Table in Edit mode
   const handleAddEditItem = (e: React.MouseEvent) => {
     e.preventDefault();
+    setEditError('');
+    const isBillMonth = isBillMonthCategory(editCategory);
     if (!editItemDesc.trim()) {
-      alert(editCategory === 'office_rent' ? 'Please enter the rental month.' : 'Please enter the item description.');
+      setEditError(
+        editCategory === 'office_rent'
+          ? 'Please enter the rental month.'
+          : isBillMonth
+            ? 'Please enter the bill of month.'
+            : 'Please enter the item description.'
+      );
       return;
     }
-    const qty = Number(editItemQty);
+    const qty = isBillMonth ? 1 : Number(editItemQty);
     const amt = Number(editItemAmt);
-    if (isNaN(qty) || qty <= 0) {
-      alert('Please enter a valid quantity in numbers.');
+    if (!isBillMonth && (isNaN(qty) || qty <= 0)) {
+      setEditError('Please enter a valid quantity in numbers.');
       return;
     }
     if (isNaN(amt) || amt <= 0) {
-      alert('Please enter a valid amount in numbers.');
+      setEditError('Please enter a valid amount in numbers.');
       return;
     }
 
     const newItem = {
       sn: editVoucherItems.length + 1,
       description: editItemDesc.trim(),
-      uom: editCategory === 'office_rent' ? 'Month' : (editItemUom.trim() || 'Pcs'),
+      uom: editCategory === 'office_rent' || isBillMonth ? 'Month' : (editItemUom.trim() || 'Pcs'),
       quantity: qty,
       amount: amt
     };
@@ -259,6 +316,52 @@ export function VoucherSection({ userId, onAddTransaction, currentUserProfile }:
     setEditVoucherItems(updated);
 
     const sum = updated.reduce((acc, item) => acc + item.amount, 0);
+    setEditAmount(sum > 0 ? sum.toString() : '0');
+  };
+
+  // Add / Remove Salary Entry in Edit Mode
+  const handleAddEditSalaryLog = (e: React.MouseEvent) => {
+    e.preventDefault();
+    setEditError('');
+    if (!editSalEmpName.trim() || !editSalMonth.trim()) {
+      setEditError('Please enter Employee Name and Month for the salary entry.');
+      return;
+    }
+    if (currentEditSalaryDraftTotal <= 0) {
+      setEditError('Total salary amount must be greater than 0.');
+      return;
+    }
+
+    const newEntry: SalaryLog = {
+      employeeName: editSalEmpName.trim(),
+      month: editSalMonth.trim(),
+      basicSalary: toSalaryNum(editSalBasic),
+      houseRent: toSalaryNum(editSalHouseRent),
+      medicalAllowance: toSalaryNum(editSalMedical),
+      transport: toSalaryNum(editSalTransport),
+      overtime: toSalaryNum(editSalOvertime),
+      mobileBill: toSalaryNum(editSalMobileBill),
+      totalAmount: currentEditSalaryDraftTotal,
+    };
+
+    const updated = [...editSalaryLogs, newEntry];
+    setEditSalaryLogs(updated);
+    setEditAmount(updated.reduce((acc, item) => acc + item.totalAmount, 0).toString());
+
+    setEditSalEmpName('');
+    setEditSalMonth('');
+    setEditSalBasic('');
+    setEditSalHouseRent('');
+    setEditSalMedical('');
+    setEditSalTransport('');
+    setEditSalOvertime('');
+    setEditSalMobileBill('');
+  };
+
+  const handleRemoveEditSalaryLog = (idx: number) => {
+    const updated = editSalaryLogs.filter((_, i) => i !== idx);
+    setEditSalaryLogs(updated);
+    const sum = updated.reduce((acc, item) => acc + item.totalAmount, 0);
     setEditAmount(sum > 0 ? sum.toString() : '0');
   };
 
@@ -295,12 +398,36 @@ export function VoucherSection({ userId, onAddTransaction, currentUserProfile }:
       setEditError('Voucher number is missing.');
       return;
     }
-    const parsedAmount = Number(editAmount);
+    let finalEditSalaryLogs = editSalaryLogs;
+    if (editCategory === 'salary' && finalEditSalaryLogs.length === 0) {
+      if (editSalEmpName.trim() && editSalMonth.trim() && currentEditSalaryDraftTotal > 0) {
+        finalEditSalaryLogs = [
+          {
+            employeeName: editSalEmpName.trim(),
+            month: editSalMonth.trim(),
+            basicSalary: toSalaryNum(editSalBasic),
+            houseRent: toSalaryNum(editSalHouseRent),
+            medicalAllowance: toSalaryNum(editSalMedical),
+            transport: toSalaryNum(editSalTransport),
+            overtime: toSalaryNum(editSalOvertime),
+            mobileBill: toSalaryNum(editSalMobileBill),
+            totalAmount: currentEditSalaryDraftTotal,
+          },
+        ];
+      } else {
+        setEditError('Please enter Employee Name, Month, and salary amounts for the Salary category.');
+        return;
+      }
+    }
+    const parsedAmount =
+      editCategory === 'salary'
+        ? finalEditSalaryLogs.reduce((acc, item) => acc + item.totalAmount, 0)
+        : Number(editAmount);
     if (editCategory === 'transport' && editTransportLogs.length === 0) {
       setEditError('At least one route detail must be added for the transport category.');
       return;
     }
-    if (editCategory !== 'transport' && editVoucherItems.length > 0) {
+    if (editCategory !== 'transport' && editCategory !== 'salary' && editVoucherItems.length > 0) {
       const calculatedSum = editVoucherItems.reduce((acc, i) => acc + i.amount, 0);
       if (calculatedSum !== parsedAmount) {
         setEditError('The total voucher amount does not match the sum of the item table. Please correct the items.');
@@ -328,13 +455,15 @@ export function VoucherSection({ userId, onAddTransaction, currentUserProfile }:
         category: editCategory,
         date: editDate,
         submittedBy: editSubmittedBy.trim(),
+        paymentMethod: editingVoucher.paymentMethod || 'Cash',
         status: editingVoucher.status,
         notes: editNotes.trim(),
         rejectionReason: editingVoucher.rejectionReason || '',
         attachmentName: editAttachmentName || '',
         attachmentData: editAttachmentData || '',
         transportLogs: editCategory === 'transport' ? editTransportLogs : [],
-        items: editCategory === 'transport' ? [] : editVoucherItems,
+        items: editCategory === 'transport' || editCategory === 'salary' ? [] : editVoucherItems,
+        salaryLogs: editCategory === 'salary' ? finalEditSalaryLogs : [],
         createdAt: editingVoucher.createdAt ? new Date(editingVoucher.createdAt) : serverTimestamp(),
         updatedAt: serverTimestamp(),
       });
@@ -374,8 +503,9 @@ export function VoucherSection({ userId, onAddTransaction, currentUserProfile }:
           <thead>
               <tr>
                   <th style="width: 8%; text-align: center;">SL</th>
-                  <th style="width: 45%; text-align: left;">Route (Route Path)</th>
-                  <th style="width: 32%; text-align: left;">Purpose / Medium</th>
+                  <th style="width: 35%; text-align: left;">Route (Route Path)</th>
+                  <th style="width: 24%; text-align: left;">Purpose / Medium</th>
+                  <th style="width: 18%; text-align: left;">Person</th>
                   <th style="text-align: right; width: 15%;">Fare</th>
               </tr>
           </thead>
@@ -385,6 +515,7 @@ export function VoucherSection({ userId, onAddTransaction, currentUserProfile }:
                   <td style="text-align: center; font-weight: bold; color: #64748b;">${idx + 1}</td>
                   <td style="font-weight: 600; color: #0f172a;">${log.fromLocation} &rarr; ${log.toLocation}</td>
                   <td style="color: #475569;">${log.reason}</td>
+                  <td style="color: #475569;">${log.person || '-'}</td>
                   <td style="text-align: right; font-weight: 700; color: #10b981; font-family: sans-serif;">৳ ${log.amount.toLocaleString('en-US')}</td>
               </tr>
               `).join('')}
@@ -394,17 +525,20 @@ export function VoucherSection({ userId, onAddTransaction, currentUserProfile }:
     }
 
     let itemsTableHtml = '';
-    if (v.category !== 'transport' && v.items && v.items.length > 0) {
+    if (v.category !== 'transport' && v.category !== 'salary' && v.items && v.items.length > 0) {
+      const isBillMonth = isBillMonthCategory(v.category);
+      const showUom = v.category !== 'office_rent' && !isBillMonth;
+      const showQty = !isBillMonth;
       itemsTableHtml = `
-      <div class="table-title">📋 Detailed Voucher Items & Price List</div>
+      <div class="table-title">${v.category === 'office_rent' ? '🏢 Office Rent Statement' : isBillMonth ? '📋 Bill of Month &amp; Amount List' : '📋 Detailed Voucher Items &amp; Price List'}</div>
       <table class="route-table">
           <thead>
               <tr>
                   <th style="width: 8%; text-align: center;">SL</th>
-                  <th style="width: 50%; text-align: left;">Description</th>
-                  <th style="width: 15%; text-align: center;">UoM</th>
-                  <th style="width: 12%; text-align: center;">Qty</th>
-                  <th style="text-align: right; width: 15%;">Amount</th>
+                  <th style="width: ${showUom ? '50%' : isBillMonth ? '70%' : '62%'}; text-align: left;">${v.category === 'office_rent' ? 'Rent Month' : isBillMonth ? 'Bill of Month' : 'Description'}</th>
+                  ${showUom ? '<th style="width: 15%; text-align: center;">UoM</th>' : ''}
+                  ${showQty ? '<th style="width: 12%; text-align: center;">Qty</th>' : ''}
+                  <th style="text-align: right; width: ${showUom ? '15%' : isBillMonth ? '22%' : '18%'};">Amount</th>
               </tr>
           </thead>
           <tbody>
@@ -412,9 +546,46 @@ export function VoucherSection({ userId, onAddTransaction, currentUserProfile }:
               <tr>
                   <td style="text-align: center; font-weight: bold; color: #64748b;">${item.sn}</td>
                   <td style="font-weight: 600; color: #0f172a;">${item.description}</td>
-                  <td style="text-align: center; color: #475569;">${item.uom}</td>
-                  <td style="text-align: center; font-weight: 700; color: #334155;">${item.quantity}</td>
+                  ${showUom ? `<td style="text-align: center; color: #475569;">${item.uom}</td>` : ''}
+                  ${showQty ? `<td style="text-align: center; font-weight: 700; color: #334155;">${item.quantity}</td>` : ''}
                   <td style="text-align: right; font-weight: 700; color: #10b981; font-family: sans-serif;">৳ ${item.amount.toLocaleString('en-US')}</td>
+              </tr>
+              `).join('')}
+          </tbody>
+      </table>
+      `;
+    }
+
+    let salaryTableHtml = '';
+    if (v.category === 'salary' && v.salaryLogs && v.salaryLogs.length > 0) {
+      salaryTableHtml = `
+      <div class="table-title">💼 Detailed Salary Statement</div>
+      <table class="route-table" style="font-size: 10.5px;">
+          <thead>
+              <tr>
+                  <th style="text-align: left;">Employee</th>
+                  <th style="text-align: left;">Month</th>
+                  <th style="text-align: right;">Basic</th>
+                  <th style="text-align: right;">House</th>
+                  <th style="text-align: right;">Medical</th>
+                  <th style="text-align: right;">Transport</th>
+                  <th style="text-align: right;">Overtime</th>
+                  <th style="text-align: right;">Mobile</th>
+                  <th style="text-align: right;">Total</th>
+              </tr>
+          </thead>
+          <tbody>
+              ${v.salaryLogs.map((s) => `
+              <tr>
+                  <td style="font-weight: 700; color: #0f172a;">${s.employeeName}</td>
+                  <td style="color: #475569;">${s.month}</td>
+                  <td style="text-align: right;">${s.basicSalary.toLocaleString('en-US')}</td>
+                  <td style="text-align: right;">${s.houseRent.toLocaleString('en-US')}</td>
+                  <td style="text-align: right;">${s.medicalAllowance.toLocaleString('en-US')}</td>
+                  <td style="text-align: right;">${s.transport.toLocaleString('en-US')}</td>
+                  <td style="text-align: right;">${s.overtime.toLocaleString('en-US')}</td>
+                  <td style="text-align: right;">${s.mobileBill.toLocaleString('en-US')}</td>
+                  <td style="text-align: right; font-weight: 800; color: #10b981;">৳ ${s.totalAmount.toLocaleString('en-US')}</td>
               </tr>
               `).join('')}
           </tbody>
@@ -736,6 +907,7 @@ export function VoucherSection({ userId, onAddTransaction, currentUserProfile }:
 
         ${transportRoutesHtml}
         ${itemsTableHtml}
+        ${salaryTableHtml}
 
         ${v.notes ? `
         <div class="notes-box">
@@ -834,10 +1006,11 @@ export function VoucherSection({ userId, onAddTransaction, currentUserProfile }:
   };
 
   // Transport Log States
-  const [transportLogs, setTransportLogs] = useState<{ fromLocation: string; toLocation: string; reason: string; amount: number }[]>([]);
+  const [transportLogs, setTransportLogs] = useState<{ fromLocation: string; toLocation: string; reason: string; person?: string; amount: number }[]>([]);
   const [fromLoc, setFromLoc] = useState('');
   const [toLoc, setToLoc] = useState('');
   const [tReason, setTReason] = useState('');
+  const [tPerson, setTPerson] = useState('');
   const [tAmount, setTAmount] = useState('');
 
   // General Items Table States (Auto-generated SN, Description, UoM, Quantity, Taka/Amount)
@@ -847,10 +1020,50 @@ export function VoucherSection({ userId, onAddTransaction, currentUserProfile }:
   const [itemQty, setItemQty] = useState('');
   const [itemAmt, setItemAmt] = useState('');
 
-  // Reset transport logs and items if category is changed
+  // Salary Category States
+  const [salaryLogs, setSalaryLogs] = useState<SalaryLog[]>([]);
+  const [salEmpName, setSalEmpName] = useState('');
+  const [salMonth, setSalMonth] = useState('');
+  const [salBasic, setSalBasic] = useState('');
+  const [salHouseRent, setSalHouseRent] = useState('');
+  const [salMedical, setSalMedical] = useState('');
+  const [salTransport, setSalTransport] = useState('');
+  const [salOvertime, setSalOvertime] = useState('');
+  const [salMobileBill, setSalMobileBill] = useState('');
+
+  const currentSalaryDraftTotal = calcSalaryTotal(
+    salBasic,
+    salHouseRent,
+    salMedical,
+    salTransport,
+    salOvertime,
+    salMobileBill
+  );
+
+  useEffect(() => {
+    if (category === 'salary') {
+      if (salaryLogs.length > 0) {
+        const sum = salaryLogs.reduce((acc, item) => acc + item.totalAmount, 0);
+        setAmount(sum.toString());
+      } else {
+        setAmount(currentSalaryDraftTotal > 0 ? currentSalaryDraftTotal.toString() : '0');
+      }
+    }
+  }, [category, salaryLogs, currentSalaryDraftTotal]);
+
+  // Reset transport logs, salary logs, and items if category is changed
   useEffect(() => {
     setTransportLogs([]);
     setVoucherItems([]);
+    setSalaryLogs([]);
+    setSalEmpName('');
+    setSalMonth('');
+    setSalBasic('');
+    setSalHouseRent('');
+    setSalMedical('');
+    setSalTransport('');
+    setSalOvertime('');
+    setSalMobileBill('');
     setAmount('0');
   }, [category]);
 
@@ -935,6 +1148,7 @@ export function VoucherSection({ userId, onAddTransaction, currentUserProfile }:
             attachmentData: data.attachmentData || '',
             transportLogs: data.transportLogs || [],
             items: data.items || [],
+            salaryLogs: data.salaryLogs || [],
             supervisorApprovedBy: data.supervisorApprovedBy || '',
             managerApprovedBy: data.managerApprovedBy || '',
             accountsApprovedBy: data.accountsApprovedBy || '',
@@ -980,6 +1194,7 @@ export function VoucherSection({ userId, onAddTransaction, currentUserProfile }:
       fromLocation: fromLoc.trim(),
       toLocation: toLoc.trim(),
       reason: tReason.trim(),
+      person: tPerson.trim(),
       amount: val
     };
 
@@ -994,6 +1209,7 @@ export function VoucherSection({ userId, onAddTransaction, currentUserProfile }:
     setFromLoc('');
     setToLoc('');
     setTReason('');
+    setTPerson('');
     setTAmount('');
   };
 
@@ -1008,25 +1224,33 @@ export function VoucherSection({ userId, onAddTransaction, currentUserProfile }:
   // Add Item to universal Table
   const handleAddItem = (e: React.MouseEvent) => {
     e.preventDefault();
+    setError('');
+    const isBillMonth = isBillMonthCategory(category);
     if (!itemDesc.trim()) {
-      alert(category === 'office_rent' ? 'Please enter the rental month.' : 'Please enter the item description.');
+      setError(
+        category === 'office_rent'
+          ? 'Please enter the rental month.'
+          : isBillMonth
+            ? 'Please enter the bill of month.'
+            : 'Please enter the item description.'
+      );
       return;
     }
-    const qty = Number(itemQty);
+    const qty = isBillMonth ? 1 : Number(itemQty);
     const amt = Number(itemAmt);
-    if (isNaN(qty) || qty <= 0) {
-      alert('Please enter a valid quantity in numbers.');
+    if (!isBillMonth && (isNaN(qty) || qty <= 0)) {
+      setError('Please enter a valid quantity in numbers.');
       return;
     }
     if (isNaN(amt) || amt <= 0) {
-      alert('Please enter a valid amount in numbers.');
+      setError('Please enter a valid amount in numbers.');
       return;
     }
 
     const newItem = {
       sn: voucherItems.length + 1,
       description: itemDesc.trim(),
-      uom: category === 'office_rent' ? 'Month' : (itemUom.trim() || 'Pcs'),
+      uom: category === 'office_rent' || isBillMonth ? 'Month' : (itemUom.trim() || 'Pcs'),
       quantity: qty,
       amount: amt
     };
@@ -1058,6 +1282,52 @@ export function VoucherSection({ userId, onAddTransaction, currentUserProfile }:
     setAmount(sum > 0 ? sum.toString() : '0');
   };
 
+  // Add / Remove Salary Log
+  const handleAddSalaryLog = (e: React.MouseEvent) => {
+    e.preventDefault();
+    setError('');
+    if (!salEmpName.trim() || !salMonth.trim()) {
+      setError('Please enter Employee Name and Month.');
+      return;
+    }
+    if (currentSalaryDraftTotal <= 0) {
+      setError('Total salary amount must be greater than 0.');
+      return;
+    }
+
+    const newEntry: SalaryLog = {
+      employeeName: salEmpName.trim(),
+      month: salMonth.trim(),
+      basicSalary: toSalaryNum(salBasic),
+      houseRent: toSalaryNum(salHouseRent),
+      medicalAllowance: toSalaryNum(salMedical),
+      transport: toSalaryNum(salTransport),
+      overtime: toSalaryNum(salOvertime),
+      mobileBill: toSalaryNum(salMobileBill),
+      totalAmount: currentSalaryDraftTotal,
+    };
+
+    const updated = [...salaryLogs, newEntry];
+    setSalaryLogs(updated);
+    setAmount(updated.reduce((acc, item) => acc + item.totalAmount, 0).toString());
+
+    setSalEmpName('');
+    setSalMonth('');
+    setSalBasic('');
+    setSalHouseRent('');
+    setSalMedical('');
+    setSalTransport('');
+    setSalOvertime('');
+    setSalMobileBill('');
+  };
+
+  const handleRemoveSalaryLog = (idx: number) => {
+    const updated = salaryLogs.filter((_, i) => i !== idx);
+    setSalaryLogs(updated);
+    const sum = updated.reduce((acc, item) => acc + item.totalAmount, 0);
+    setAmount(sum > 0 ? sum.toString() : '0');
+  };
+
   // Handle submit voucher
   const handleSubmitVoucher = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -1068,12 +1338,36 @@ export function VoucherSection({ userId, onAddTransaction, currentUserProfile }:
       setError('Voucher number is missing.');
       return;
     }
-    const parsedAmount = Number(amount);
+    let finalSalaryLogs = salaryLogs;
+    if (category === 'salary' && finalSalaryLogs.length === 0) {
+      if (salEmpName.trim() && salMonth.trim() && currentSalaryDraftTotal > 0) {
+        finalSalaryLogs = [
+          {
+            employeeName: salEmpName.trim(),
+            month: salMonth.trim(),
+            basicSalary: toSalaryNum(salBasic),
+            houseRent: toSalaryNum(salHouseRent),
+            medicalAllowance: toSalaryNum(salMedical),
+            transport: toSalaryNum(salTransport),
+            overtime: toSalaryNum(salOvertime),
+            mobileBill: toSalaryNum(salMobileBill),
+            totalAmount: currentSalaryDraftTotal,
+          },
+        ];
+      } else {
+        setError('Please enter Employee Name, Month, and salary amounts for the Salary category.');
+        return;
+      }
+    }
+    const parsedAmount =
+      category === 'salary'
+        ? finalSalaryLogs.reduce((acc, item) => acc + item.totalAmount, 0)
+        : Number(amount);
     if (category === 'transport' && transportLogs.length === 0) {
       setError('At least one route detail must be added for the transport category.');
       return;
     }
-    if (category !== 'transport' && voucherItems.length > 0) {
+    if (category !== 'transport' && category !== 'salary' && voucherItems.length > 0) {
       // Validate amount corresponds to items
       const calculatedSum = voucherItems.reduce((acc, i) => acc + i.amount, 0);
       if (calculatedSum !== parsedAmount) {
@@ -1113,7 +1407,8 @@ export function VoucherSection({ userId, onAddTransaction, currentUserProfile }:
         attachmentName: attachmentName || '',
         attachmentData: attachmentData || '',
         transportLogs: category === 'transport' ? transportLogs : [],
-        items: category === 'transport' ? [] : voucherItems,
+        items: category === 'transport' || category === 'salary' ? [] : voucherItems,
+        salaryLogs: category === 'salary' ? finalSalaryLogs : [],
         createdAt: serverTimestamp(),
         updatedAt: serverTimestamp(),
       });
@@ -1127,6 +1422,15 @@ export function VoucherSection({ userId, onAddTransaction, currentUserProfile }:
       setAttachmentData('');
       setTransportLogs([]);
       setVoucherItems([]);
+      setSalaryLogs([]);
+      setSalEmpName('');
+      setSalMonth('');
+      setSalBasic('');
+      setSalHouseRent('');
+      setSalMedical('');
+      setSalTransport('');
+      setSalOvertime('');
+      setSalMobileBill('');
       setIsCreateModalOpen(false);
       alert('The new daily expense voucher has been submitted successfully and is pending approval review!');
       setSuccess('The new voucher has been submitted successfully and is pending!');
@@ -1191,6 +1495,7 @@ export function VoucherSection({ userId, onAddTransaction, currentUserProfile }:
         attachmentData: voucher.attachmentData || '',
         transportLogs: voucher.transportLogs || [],
         items: voucher.items || [],
+        salaryLogs: voucher.salaryLogs || [],
         supervisorApprovedBy: supBy,
         supervisorApprovedAt: supAt,
         supervisorComment: supComm,
@@ -1554,11 +1859,14 @@ export function VoucherSection({ userId, onAddTransaction, currentUserProfile }:
                   placeholder="e.g., 1500"
                   value={amount}
                   onChange={(e) => setAmount(e.target.value)}
-                  disabled={category === 'transport'}
+                  disabled={category === 'transport' || category === 'salary'}
                   className="w-full px-3.5 py-2.5 border border-slate-200 rounded-xl bg-slate-50/50 focus:outline-none focus:ring-1 focus:ring-indigo-500 text-slate-800 text-xs font-bold disabled:opacity-75 disabled:bg-slate-100"
                 />
                 {category === 'transport' && (
                   <span className="text-[9px] text-indigo-600 font-bold mt-1 block">Automatically calculated from the route details below</span>
+                )}
+                {category === 'salary' && (
+                  <span className="text-[9px] text-emerald-600 font-bold mt-1 block">Automatically calculated from the salary breakdown below</span>
                 )}
               </div>
 
@@ -1609,7 +1917,7 @@ export function VoucherSection({ userId, onAddTransaction, currentUserProfile }:
                 </div>
 
                 <div className="grid grid-cols-12 gap-2">
-                  <div className="col-span-8">
+                  <div className="col-span-12 sm:col-span-5">
                     <label className="block text-[10px] font-bold text-slate-500 mb-0.5">Purpose / Reason of Travel *</label>
                     <input 
                       type="text" 
@@ -1619,7 +1927,17 @@ export function VoucherSection({ userId, onAddTransaction, currentUserProfile }:
                       className="w-full px-2.5 py-2.5 border border-slate-200 bg-white rounded-xl focus:outline-none focus:ring-1 focus:ring-indigo-400 text-slate-800 text-xs" 
                     />
                   </div>
-                  <div className="col-span-4">
+                  <div className="col-span-7 sm:col-span-4">
+                    <label className="block text-[10px] font-bold text-slate-500 mb-0.5">Person</label>
+                    <input 
+                      type="text" 
+                      placeholder="e.g., Person name" 
+                      value={tPerson}
+                      onChange={(e) => setTPerson(e.target.value)}
+                      className="w-full px-2.5 py-2.5 border border-slate-200 bg-white rounded-xl focus:outline-none focus:ring-1 focus:ring-indigo-400 text-slate-800 text-xs" 
+                    />
+                  </div>
+                  <div className="col-span-5 sm:col-span-3">
                     <label className="block text-[10px] font-bold text-slate-500 mb-0.5">Fare (৳) *</label>
                     <input 
                       type="number" 
@@ -1648,6 +1966,7 @@ export function VoucherSection({ userId, onAddTransaction, currentUserProfile }:
                         <tr>
                           <th className="p-2">Route (From - To)</th>
                           <th className="p-2">Purpose</th>
+                          <th className="p-2">Person</th>
                           <th className="p-2 text-right">Fare</th>
                           <th className="p-2 text-center">Delete</th>
                         </tr>
@@ -1659,6 +1978,7 @@ export function VoucherSection({ userId, onAddTransaction, currentUserProfile }:
                               {log.fromLocation} → {log.toLocation}
                             </td>
                             <td className="p-2 text-slate-500 font-medium">{log.reason}</td>
+                            <td className="p-2 text-slate-600 font-semibold">{log.person || '-'}</td>
                             <td className="p-2 text-right font-black text-slate-800 font-mono">
                               ৳ {log.amount}
                             </td>
@@ -1684,31 +2004,217 @@ export function VoucherSection({ userId, onAddTransaction, currentUserProfile }:
               </div>
             )}
 
-            {/* General Items Table Section (Shown when category is selected and is not transport) */}
-            {category !== 'transport' && (
+            {/* Salary detailed breakdown entry sub-section */}
+            {category === 'salary' && (
+              <div className="p-4 bg-emerald-50/50 border border-emerald-200/70 rounded-2xl space-y-3">
+                <div className="flex items-center justify-between text-emerald-950 font-bold text-xs">
+                  <span>💼 Employee Salary Breakdown</span>
+                  <span className="text-[10px] font-mono font-extrabold text-emerald-700 bg-emerald-100/80 px-2 py-0.5 rounded-lg">
+                    Auto Total: ৳ {currentSalaryDraftTotal.toLocaleString('en-US')}
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                  <div>
+                    <label className="block text-[10px] font-bold text-slate-500 mb-0.5">Employee Name *</label>
+                    <input
+                      type="text"
+                      placeholder="e.g., Md. Rahim"
+                      value={salEmpName}
+                      onChange={(e) => setSalEmpName(e.target.value)}
+                      className="w-full px-2.5 py-2 border border-slate-200 bg-white rounded-xl focus:outline-none focus:ring-1 focus:ring-emerald-500 text-slate-800 text-xs"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-bold text-slate-500 mb-0.5">Month *</label>
+                    <input
+                      type="text"
+                      placeholder="e.g., November 2026"
+                      value={salMonth}
+                      onChange={(e) => setSalMonth(e.target.value)}
+                      className="w-full px-2.5 py-2 border border-slate-200 bg-white rounded-xl focus:outline-none focus:ring-1 focus:ring-emerald-500 text-slate-800 text-xs"
+                    />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                  <div>
+                    <label className="block text-[10px] font-bold text-slate-500 mb-0.5">Basic Salary</label>
+                    <input
+                      type="number"
+                      min="0"
+                      placeholder="0"
+                      value={salBasic}
+                      onChange={(e) => setSalBasic(e.target.value)}
+                      className="w-full px-2.5 py-2 border border-slate-200 bg-white rounded-xl focus:outline-none focus:ring-1 focus:ring-emerald-500 text-slate-800 text-xs font-mono font-bold"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-bold text-slate-500 mb-0.5">House Rent</label>
+                    <input
+                      type="number"
+                      min="0"
+                      placeholder="0"
+                      value={salHouseRent}
+                      onChange={(e) => setSalHouseRent(e.target.value)}
+                      className="w-full px-2.5 py-2 border border-slate-200 bg-white rounded-xl focus:outline-none focus:ring-1 focus:ring-emerald-500 text-slate-800 text-xs font-mono font-bold"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-bold text-slate-500 mb-0.5">Medical Allowance</label>
+                    <input
+                      type="number"
+                      min="0"
+                      placeholder="0"
+                      value={salMedical}
+                      onChange={(e) => setSalMedical(e.target.value)}
+                      className="w-full px-2.5 py-2 border border-slate-200 bg-white rounded-xl focus:outline-none focus:ring-1 focus:ring-emerald-500 text-slate-800 text-xs font-mono font-bold"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-bold text-slate-500 mb-0.5">Transport</label>
+                    <input
+                      type="number"
+                      min="0"
+                      placeholder="0"
+                      value={salTransport}
+                      onChange={(e) => setSalTransport(e.target.value)}
+                      className="w-full px-2.5 py-2 border border-slate-200 bg-white rounded-xl focus:outline-none focus:ring-1 focus:ring-emerald-500 text-slate-800 text-xs font-mono font-bold"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-bold text-slate-500 mb-0.5">Overtime</label>
+                    <input
+                      type="number"
+                      min="0"
+                      placeholder="0"
+                      value={salOvertime}
+                      onChange={(e) => setSalOvertime(e.target.value)}
+                      className="w-full px-2.5 py-2 border border-slate-200 bg-white rounded-xl focus:outline-none focus:ring-1 focus:ring-emerald-500 text-slate-800 text-xs font-mono font-bold"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-bold text-slate-500 mb-0.5">Mobile Bill</label>
+                    <input
+                      type="number"
+                      min="0"
+                      placeholder="0"
+                      value={salMobileBill}
+                      onChange={(e) => setSalMobileBill(e.target.value)}
+                      className="w-full px-2.5 py-2 border border-slate-200 bg-white rounded-xl focus:outline-none focus:ring-1 focus:ring-emerald-500 text-slate-800 text-xs font-mono font-bold"
+                    />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-12 gap-2 items-end pt-1">
+                  <div className="col-span-6">
+                    <label className="block text-[10px] font-bold text-emerald-800 mb-0.5">Total Amount (৳)</label>
+                    <input
+                      type="text"
+                      readOnly
+                      value={currentSalaryDraftTotal.toLocaleString('en-US')}
+                      className="w-full px-3 py-2 border border-emerald-200 bg-emerald-100/60 text-emerald-900 rounded-xl text-xs font-mono font-extrabold cursor-not-allowed"
+                    />
+                  </div>
+                  <div className="col-span-6">
+                    <button
+                      type="button"
+                      onClick={handleAddSalaryLog}
+                      className="w-full py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-xl transition cursor-pointer flex items-center justify-center gap-1.5 shadow-sm"
+                    >
+                      <PlusCircle className="w-3.5 h-3.5" />
+                      <span>Add Salary Entry</span>
+                    </button>
+                  </div>
+                </div>
+
+                {salaryLogs.length > 0 && (
+                  <div className="mt-2 overflow-x-auto border border-emerald-200 rounded-xl bg-white">
+                    <table className="w-full text-[10px] text-left text-slate-700">
+                      <thead className="bg-[#F8FAFC] text-[9px] font-black uppercase text-emerald-900 border-b border-emerald-100">
+                        <tr>
+                          <th className="p-2">Employee</th>
+                          <th className="p-2">Month</th>
+                          <th className="p-2 text-right">Basic</th>
+                          <th className="p-2 text-right">House</th>
+                          <th className="p-2 text-right">Med</th>
+                          <th className="p-2 text-right">Trans</th>
+                          <th className="p-2 text-right">OT</th>
+                          <th className="p-2 text-right">Mob</th>
+                          <th className="p-2 text-right">Total</th>
+                          <th className="p-2 text-center">Del</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {salaryLogs.map((s, idx) => (
+                          <tr key={idx} className="hover:bg-slate-50/50">
+                            <td className="p-2 font-bold text-slate-800 whitespace-nowrap">{s.employeeName}</td>
+                            <td className="p-2 text-slate-500 whitespace-nowrap">{s.month}</td>
+                            <td className="p-2 text-right font-mono">{s.basicSalary.toLocaleString('en-US')}</td>
+                            <td className="p-2 text-right font-mono">{s.houseRent.toLocaleString('en-US')}</td>
+                            <td className="p-2 text-right font-mono">{s.medicalAllowance.toLocaleString('en-US')}</td>
+                            <td className="p-2 text-right font-mono">{s.transport.toLocaleString('en-US')}</td>
+                            <td className="p-2 text-right font-mono">{s.overtime.toLocaleString('en-US')}</td>
+                            <td className="p-2 text-right font-mono">{s.mobileBill.toLocaleString('en-US')}</td>
+                            <td className="p-2 text-right font-black text-emerald-700 font-mono whitespace-nowrap">
+                              ৳ {s.totalAmount.toLocaleString('en-US')}
+                            </td>
+                            <td className="p-2 text-center">
+                              <button
+                                type="button"
+                                onClick={() => handleRemoveSalaryLog(idx)}
+                                className="text-rose-500 hover:text-rose-700 p-0.5"
+                                title="Delete"
+                              >
+                                <Trash2 className="w-3.5 h-3.5 mx-auto cursor-pointer" />
+                              </button>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                    <div className="bg-emerald-50/40 p-2 text-right border-t border-emerald-100 text-[10px] font-black text-emerald-950">
+                      Total Salary Expense:{' '}
+                      <span className="font-mono text-xs">
+                        ৳ {salaryLogs.reduce((sum, s) => sum + s.totalAmount, 0).toLocaleString('en-US')}
+                      </span>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* General Items Table Section (Shown when category is selected and is not transport or salary) */}
+            {category !== 'transport' && category !== 'salary' && (() => {
+              const isBillMonth = isBillMonthCategory(category);
+              const showUom = category !== 'office_rent' && !isBillMonth;
+              const showQty = !isBillMonth;
+              return (
               <div className="p-4 bg-indigo-50/40 border border-slate-200/60 rounded-2xl space-y-3">
                 <div className="flex items-center gap-1.5 text-slate-800 font-bold text-xs select-none">
                   <span>{category === 'office_rent' ? '🏢 Office Rent Statement List' : '📋 Voucher Item List (Optional)'}</span>
                 </div>
                 
                 <div className="grid grid-cols-12 gap-2 text-[10px] font-bold text-slate-500 select-none">
-                  <div className="col-span-5">{category === 'office_rent' ? 'Rent Month *' : 'Item Description *'}</div>
-                  {category !== 'office_rent' && <div className="col-span-2">UoM *</div>}
-                  <div className={category === 'office_rent' ? 'col-span-3' : 'col-span-2'}>Qty *</div>
-                  <div className={category === 'office_rent' ? 'col-span-4' : 'col-span-3'}>Amount *</div>
+                  <div className={isBillMonth ? 'col-span-7' : 'col-span-5'}>
+                    {category === 'office_rent' ? 'Rent Month *' : isBillMonth ? 'Bill of Month *' : 'Item Description *'}
+                  </div>
+                  {showUom && <div className="col-span-2">UoM *</div>}
+                  {showQty && <div className={category === 'office_rent' ? 'col-span-3' : 'col-span-2'}>Qty *</div>}
+                  <div className={isBillMonth ? 'col-span-5' : category === 'office_rent' ? 'col-span-4' : 'col-span-3'}>Amount *</div>
                 </div>
 
                 <div className="grid grid-cols-12 gap-2">
-                  <div className="col-span-5">
+                  <div className={isBillMonth ? 'col-span-7' : 'col-span-5'}>
                     <input 
                       type="text" 
-                      placeholder={category === 'office_rent' ? 'e.g., January 2026' : 'e.g., Notebook and Pen'} 
+                      placeholder={category === 'office_rent' ? 'e.g., January 2026' : isBillMonth ? 'e.g., November 2026' : 'e.g., Notebook and Pen'} 
                       value={itemDesc}
                       onChange={(e) => setItemDesc(e.target.value)}
                       className="w-full px-2.5 py-1.5 border border-slate-200 bg-white rounded-xl focus:outline-none focus:ring-1 focus:ring-indigo-400 text-slate-800 text-xs" 
                     />
                   </div>
-                  {category !== 'office_rent' && (
+                  {showUom && (
                     <div className="col-span-2">
                       <select
                         value={itemUom}
@@ -1728,16 +2234,18 @@ export function VoucherSection({ userId, onAddTransaction, currentUserProfile }:
                       </select>
                     </div>
                   )}
-                  <div className={category === 'office_rent' ? 'col-span-3' : 'col-span-2'}>
-                    <input 
-                      type="number" 
-                      placeholder={category === 'office_rent' ? 'e.g., 1' : 'qty'} 
-                      value={itemQty}
-                      onChange={(e) => setItemQty(e.target.value)}
-                      className="w-full px-1 py-1.5 border border-slate-200 bg-white rounded-xl focus:outline-none focus:ring-1 focus:ring-indigo-400 text-slate-800 text-xs font-mono font-bold text-center" 
-                    />
-                  </div>
-                  <div className={category === 'office_rent' ? 'col-span-4 flex gap-1' : 'col-span-3 flex gap-1'}>
+                  {showQty && (
+                    <div className={category === 'office_rent' ? 'col-span-3' : 'col-span-2'}>
+                      <input 
+                        type="number" 
+                        placeholder={category === 'office_rent' ? 'e.g., 1' : 'qty'} 
+                        value={itemQty}
+                        onChange={(e) => setItemQty(e.target.value)}
+                        className="w-full px-1 py-1.5 border border-slate-200 bg-white rounded-xl focus:outline-none focus:ring-1 focus:ring-indigo-400 text-slate-800 text-xs font-mono font-bold text-center" 
+                      />
+                    </div>
+                  )}
+                  <div className={`${isBillMonth ? 'col-span-5' : category === 'office_rent' ? 'col-span-4' : 'col-span-3'} flex gap-1`}>
                     <input 
                       type="number" 
                       placeholder="Amount" 
@@ -1763,9 +2271,11 @@ export function VoucherSection({ userId, onAddTransaction, currentUserProfile }:
                       <thead className="bg-[#FAFAFA] text-[9px] font-black uppercase text-slate-400 border-b border-slate-100">
                         <tr>
                           <th className="p-2 w-10 text-center">SL</th>
-                          <th className="p-2 text-left">{category === 'office_rent' ? 'Rent Month' : 'Description'}</th>
-                          {category !== 'office_rent' && <th className="p-2 text-center">UoM</th>}
-                          <th className="p-2 text-center">Qty</th>
+                          <th className="p-2 text-left">
+                            {category === 'office_rent' ? 'Rent Month' : isBillMonth ? 'Bill of Month' : 'Description'}
+                          </th>
+                          {showUom && <th className="p-2 text-center">UoM</th>}
+                          {showQty && <th className="p-2 text-center">Qty</th>}
                           <th className="p-2 text-right">Amount</th>
                           <th className="p-2 text-center w-10">Delete</th>
                         </tr>
@@ -1775,10 +2285,12 @@ export function VoucherSection({ userId, onAddTransaction, currentUserProfile }:
                           <tr key={idx} className="hover:bg-slate-50/50">
                             <td className="p-2 text-center font-bold text-slate-400">{item.sn}</td>
                             <td className="p-2 font-bold text-slate-800">{item.description}</td>
-                            {category !== 'office_rent' && <td className="p-2 text-center text-slate-500 font-medium">{item.uom}</td>}
-                            <td className="p-2 text-center font-bold font-mono">
-                              {item.quantity} {item.uom === 'Month' ? 'Month' : item.uom}
-                            </td>
+                            {showUom && <td className="p-2 text-center text-slate-500 font-medium">{item.uom}</td>}
+                            {showQty && (
+                              <td className="p-2 text-center font-bold font-mono">
+                                {item.quantity} {item.uom === 'Month' ? 'Month' : item.uom}
+                              </td>
+                            )}
                             <td className="p-2 text-right font-black text-slate-800 font-mono">
                               ৳ {item.amount.toLocaleString('en-US')}
                             </td>
@@ -1797,12 +2309,13 @@ export function VoucherSection({ userId, onAddTransaction, currentUserProfile }:
                       </tbody>
                     </table>
                     <div className="bg-slate-50 p-2 text-right border-t border-slate-100 text-[10px] font-black text-slate-600">
-                      Total {category === 'office_rent' ? 'Rent' : 'Item Value'}: <span className="font-sans font-mono text-xs text-slate-900">৳ {voucherItems.reduce((sum, l) => sum + l.amount, 0).toLocaleString('en-US')}</span>
+                      Total {category === 'office_rent' ? 'Rent' : isBillMonth ? 'Bill' : 'Item Value'}: <span className="font-sans font-mono text-xs text-slate-900">৳ {voucherItems.reduce((sum, l) => sum + l.amount, 0).toLocaleString('en-US')}</span>
                     </div>
                   </div>
                 )}
               </div>
-            )}
+              );
+            })()}
 
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
               <div>
@@ -2363,6 +2876,7 @@ export function VoucherSection({ userId, onAddTransaction, currentUserProfile }:
                                         <tr>
                                           <th className="px-3 py-2 text-left font-bold">Route</th>
                                           <th className="px-3 py-2 text-left font-bold">Purpose</th>
+                                          <th className="px-3 py-2 text-left font-bold">Person</th>
                                           <th className="px-3 py-2 text-right font-bold">Fare</th>
                                         </tr>
                                       </thead>
@@ -2373,6 +2887,7 @@ export function VoucherSection({ userId, onAddTransaction, currentUserProfile }:
                                               {log.fromLocation} ➔ {log.toLocation}
                                             </td>
                                             <td className="px-3 py-2 text-slate-500 font-medium">{log.reason}</td>
+                                            <td className="px-3 py-2 text-slate-600 font-semibold">{log.person || '-'}</td>
                                             <td className="px-3 py-2 text-right text-slate-900 font-bold font-mono">
                                               ${log.amount}
                                             </td>
@@ -2384,19 +2899,25 @@ export function VoucherSection({ userId, onAddTransaction, currentUserProfile }:
                                 )}
 
                                 {/* General item list table */}
-                                {voucher.category !== 'transport' && voucher.items && voucher.items.length > 0 && (
+                                {voucher.category !== 'transport' && voucher.category !== 'salary' && voucher.items && voucher.items.length > 0 && (() => {
+                                  const isBillMonth = isBillMonthCategory(voucher.category);
+                                  const showUom = voucher.category !== 'office_rent' && !isBillMonth;
+                                  const showQty = !isBillMonth;
+                                  return (
                                   <div className="overflow-hidden border border-slate-200/60 rounded-xl bg-white text-[11px]">
                                     <div className="bg-emerald-50/45 px-3 py-2 text-[9px] font-bold text-emerald-950 border-b border-emerald-100 flex items-center justify-between">
-                                      <span>{voucher.category === 'office_rent' ? '🏢 Office Rent Statement' : '📋 Detailed Item & Price List'}</span>
+                                      <span>{voucher.category === 'office_rent' ? '🏢 Office Rent Statement' : isBillMonth ? '📋 Bill of Month & Amount' : '📋 Detailed Item & Price List'}</span>
                                       <span className="font-mono bg-emerald-100/50 text-emerald-900 px-1.5 py-px rounded font-bold">Items: {voucher.items.length}</span>
                                     </div>
                                     <table className="w-full text-slate-700 leading-tight border-collapse">
                                       <thead className="bg-[#FAFAFA] text-[9px] text-slate-400 font-extrabold uppercase border-b border-slate-100">
                                         <tr>
                                           <th className="px-3 py-1.5 text-center font-bold">SL</th>
-                                          <th className="px-3 py-2 text-left font-bold">{voucher.category === 'office_rent' ? 'Rent Month' : 'Description'}</th>
-                                          {voucher.category !== 'office_rent' && <th className="px-3 py-2 text-center font-bold">UoM</th>}
-                                          <th className="px-3 py-2 text-center font-bold">Qty</th>
+                                          <th className="px-3 py-2 text-left font-bold">
+                                            {voucher.category === 'office_rent' ? 'Rent Month' : isBillMonth ? 'Bill of Month' : 'Description'}
+                                          </th>
+                                          {showUom && <th className="px-3 py-2 text-center font-bold">UoM</th>}
+                                          {showQty && <th className="px-3 py-2 text-center font-bold">Qty</th>}
                                           <th className="px-3 py-2 text-right font-bold">Amount</th>
                                         </tr>
                                       </thead>
@@ -2405,12 +2926,59 @@ export function VoucherSection({ userId, onAddTransaction, currentUserProfile }:
                                           <tr key={iIdx} className="hover:bg-slate-50/50">
                                             <td className="px-3 py-1.5 text-center font-bold text-slate-400 font-mono">{item.sn}</td>
                                             <td className="px-3 py-1.5 text-slate-800 font-bold">{item.description}</td>
-                                            {voucher.category !== 'office_rent' && <td className="px-3 py-1.5 text-center text-slate-500">{item.uom}</td>}
-                                            <td className="px-3 py-1.5 text-center font-mono font-bold">
-                                              {item.quantity} {item.uom === 'Month' ? 'Month' : item.uom}
-                                            </td>
+                                            {showUom && <td className="px-3 py-1.5 text-center text-slate-500">{item.uom}</td>}
+                                            {showQty && (
+                                              <td className="px-3 py-1.5 text-center font-mono font-bold">
+                                                {item.quantity} {item.uom === 'Month' ? 'Month' : item.uom}
+                                              </td>
+                                            )}
                                             <td className="px-3 py-2 text-right font-bold text-slate-900 font-mono">
-                                              ${item.amount.toLocaleString('en-US')}
+                                              ৳ {item.amount.toLocaleString('en-US')}
+                                            </td>
+                                          </tr>
+                                        ))}
+                                      </tbody>
+                                    </table>
+                                  </div>
+                                  );
+                                })()}
+
+                                {/* Salary breakdown table */}
+                                {voucher.category === 'salary' && voucher.salaryLogs && voucher.salaryLogs.length > 0 && (
+                                  <div className="overflow-x-auto border border-emerald-200/70 rounded-xl bg-white text-[10.5px]">
+                                    <div className="bg-emerald-50/60 px-3 py-2 text-[9px] font-bold text-emerald-950 border-b border-emerald-100 flex items-center justify-between">
+                                      <span>💼 Employee Salary Breakdown</span>
+                                      <span className="font-mono bg-emerald-100 text-emerald-900 px-1.5 py-px rounded font-bold">
+                                        Employees: {voucher.salaryLogs.length}
+                                      </span>
+                                    </div>
+                                    <table className="w-full text-slate-700 leading-tight border-collapse">
+                                      <thead className="bg-[#FAFAFA] text-[9px] text-slate-400 font-extrabold uppercase border-b border-slate-100">
+                                        <tr>
+                                          <th className="px-2.5 py-1.5 text-left font-bold">Employee</th>
+                                          <th className="px-2.5 py-1.5 text-left font-bold">Month</th>
+                                          <th className="px-2 py-1.5 text-right font-bold">Basic</th>
+                                          <th className="px-2 py-1.5 text-right font-bold">House Rent</th>
+                                          <th className="px-2 py-1.5 text-right font-bold">Medical</th>
+                                          <th className="px-2 py-1.5 text-right font-bold">Transport</th>
+                                          <th className="px-2 py-1.5 text-right font-bold">Overtime</th>
+                                          <th className="px-2 py-1.5 text-right font-bold">Mobile</th>
+                                          <th className="px-2.5 py-1.5 text-right font-bold">Total</th>
+                                        </tr>
+                                      </thead>
+                                      <tbody className="divide-y divide-slate-100">
+                                        {voucher.salaryLogs.map((s, sIdx) => (
+                                          <tr key={sIdx} className="hover:bg-slate-50/50">
+                                            <td className="px-2.5 py-1.5 text-slate-800 font-bold whitespace-nowrap">{s.employeeName}</td>
+                                            <td className="px-2.5 py-1.5 text-slate-500 font-medium whitespace-nowrap">{s.month}</td>
+                                            <td className="px-2 py-1.5 text-right font-mono">{s.basicSalary.toLocaleString('en-US')}</td>
+                                            <td className="px-2 py-1.5 text-right font-mono">{s.houseRent.toLocaleString('en-US')}</td>
+                                            <td className="px-2 py-1.5 text-right font-mono">{s.medicalAllowance.toLocaleString('en-US')}</td>
+                                            <td className="px-2 py-1.5 text-right font-mono">{s.transport.toLocaleString('en-US')}</td>
+                                            <td className="px-2 py-1.5 text-right font-mono">{s.overtime.toLocaleString('en-US')}</td>
+                                            <td className="px-2 py-1.5 text-right font-mono">{s.mobileBill.toLocaleString('en-US')}</td>
+                                            <td className="px-2.5 py-1.5 text-right font-bold text-emerald-700 font-mono whitespace-nowrap">
+                                              ৳ {s.totalAmount.toLocaleString('en-US')}
                                             </td>
                                           </tr>
                                         ))}
@@ -2533,6 +3101,7 @@ export function VoucherSection({ userId, onAddTransaction, currentUserProfile }:
                         <tr>
                           <th className="p-3">Route (From - To)</th>
                           <th className="p-3">Purpose</th>
+                          <th className="p-3">Person</th>
                           <th className="p-3 text-right">Fare (৳)</th>
                         </tr>
                       </thead>
@@ -2543,6 +3112,7 @@ export function VoucherSection({ userId, onAddTransaction, currentUserProfile }:
                               {log.fromLocation} → {log.toLocation}
                             </td>
                             <td className="p-3 text-slate-400 font-medium">{log.reason}</td>
+                            <td className="p-3 text-slate-300 font-semibold">{log.person || '-'}</td>
                             <td className="p-3 text-right font-bold text-emerald-400 font-mono">
                               ৳ {log.amount}
                             </td>
@@ -2554,21 +3124,70 @@ export function VoucherSection({ userId, onAddTransaction, currentUserProfile }:
                 </div>
               )}
 
-              {/* General Voucher Items Table */}
-              {trackingVoucher.category !== 'transport' && trackingVoucher.items && trackingVoucher.items.length > 0 && (
+              {/* Salary Breakdown Table in Tracking Portal */}
+              {trackingVoucher.category === 'salary' && trackingVoucher.salaryLogs && trackingVoucher.salaryLogs.length > 0 && (
                 <div className="space-y-2">
                   <h4 className="text-xs font-bold text-slate-300 uppercase tracking-wider flex items-center gap-1.5 border-b border-slate-800 pb-2">
-                    <span>{trackingVoucher.category === 'office_rent' ? '🏢 Office Rent Statement' : '📋 Voucher Details & Items'}</span>
+                    <span>💼 Employee Salary Breakdown</span>
+                  </h4>
+                  <div className="overflow-x-auto border border-slate-800 rounded-2xl bg-slate-950">
+                    <table className="w-full text-[11px] text-left text-slate-300">
+                      <thead className="bg-slate-900 border-b border-slate-800 text-[10px] font-bold text-slate-400 select-none">
+                        <tr>
+                          <th className="p-2.5">Employee</th>
+                          <th className="p-2.5">Month</th>
+                          <th className="p-2.5 text-right">Basic</th>
+                          <th className="p-2.5 text-right">House Rent</th>
+                          <th className="p-2.5 text-right">Medical</th>
+                          <th className="p-2.5 text-right">Transport</th>
+                          <th className="p-2.5 text-right">Overtime</th>
+                          <th className="p-2.5 text-right">Mobile</th>
+                          <th className="p-2.5 text-right">Total (৳)</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-900">
+                        {trackingVoucher.salaryLogs.map((s, sIdx) => (
+                          <tr key={sIdx} className="hover:bg-slate-900/50">
+                            <td className="p-2.5 font-semibold text-white whitespace-nowrap">{s.employeeName}</td>
+                            <td className="p-2.5 text-slate-400 whitespace-nowrap">{s.month}</td>
+                            <td className="p-2.5 text-right font-mono">{s.basicSalary.toLocaleString('en-US')}</td>
+                            <td className="p-2.5 text-right font-mono">{s.houseRent.toLocaleString('en-US')}</td>
+                            <td className="p-2.5 text-right font-mono">{s.medicalAllowance.toLocaleString('en-US')}</td>
+                            <td className="p-2.5 text-right font-mono">{s.transport.toLocaleString('en-US')}</td>
+                            <td className="p-2.5 text-right font-mono">{s.overtime.toLocaleString('en-US')}</td>
+                            <td className="p-2.5 text-right font-mono">{s.mobileBill.toLocaleString('en-US')}</td>
+                            <td className="p-2.5 text-right font-bold text-emerald-400 font-mono whitespace-nowrap">
+                              ৳ {s.totalAmount.toLocaleString('en-US')}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+
+              {/* General Voucher Items Table */}
+              {trackingVoucher.category !== 'transport' && trackingVoucher.category !== 'salary' && trackingVoucher.items && trackingVoucher.items.length > 0 && (() => {
+                const isBillMonth = isBillMonthCategory(trackingVoucher.category);
+                const showUom = trackingVoucher.category !== 'office_rent' && !isBillMonth;
+                const showQty = !isBillMonth;
+                return (
+                <div className="space-y-2">
+                  <h4 className="text-xs font-bold text-slate-300 uppercase tracking-wider flex items-center gap-1.5 border-b border-slate-800 pb-2">
+                    <span>{trackingVoucher.category === 'office_rent' ? '🏢 Office Rent Statement' : isBillMonth ? '📋 Bill of Month & Amount' : '📋 Voucher Details & Items'}</span>
                   </h4>
                   <div className="overflow-hidden border border-slate-800 rounded-2xl bg-slate-950">
                     <table className="w-full text-xs text-left text-slate-300">
                       <thead className="bg-slate-900 border-b border-slate-800 text-[10px] font-bold text-slate-400 select-none">
                         <tr>
                           <th className="p-3 text-center">SL</th>
-                          <th className="p-3">{trackingVoucher.category === 'office_rent' ? 'Rent Month' : 'Item Description'}</th>
-                          {trackingVoucher.category !== 'office_rent' && <th className="p-3 text-center">Unit</th>}
-                          <th className="p-3 text-center">Quantity</th>
-                          <th className="p-3 text-right">Price (৳)</th>
+                          <th className="p-3">
+                            {trackingVoucher.category === 'office_rent' ? 'Rent Month' : isBillMonth ? 'Bill of Month' : 'Item Description'}
+                          </th>
+                          {showUom && <th className="p-3 text-center">Unit</th>}
+                          {showQty && <th className="p-3 text-center">Quantity</th>}
+                          <th className="p-3 text-right">{isBillMonth ? 'Amount (৳)' : 'Price (৳)'}</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-slate-900">
@@ -2576,10 +3195,12 @@ export function VoucherSection({ userId, onAddTransaction, currentUserProfile }:
                           <tr key={iIdx} className="hover:bg-slate-900/50">
                             <td className="p-3 text-center text-slate-500 font-bold font-sans">{item.sn}</td>
                             <td className="p-3 font-semibold text-white">{item.description}</td>
-                            {trackingVoucher.category !== 'office_rent' && <td className="p-3 text-center text-slate-400">{item.uom}</td>}
-                            <td className="p-3 text-center font-bold text-white font-sans">
-                              {item.quantity} {item.uom === 'Month' ? 'Month' : item.uom}
-                            </td>
+                            {showUom && <td className="p-3 text-center text-slate-400">{item.uom}</td>}
+                            {showQty && (
+                              <td className="p-3 text-center font-bold text-white font-sans">
+                                {item.quantity} {item.uom === 'Month' ? 'Month' : item.uom}
+                              </td>
+                            )}
                             <td className="p-3 text-right font-bold text-emerald-400 font-sans">
                               ৳ {item.amount.toLocaleString('en-US')}
                             </td>
@@ -2589,7 +3210,8 @@ export function VoucherSection({ userId, onAddTransaction, currentUserProfile }:
                     </table>
                   </div>
                 </div>
-              )}
+                );
+              })()}
 
               {/* Extra comments or cancellation message */}
               {trackingVoucher.notes && (
@@ -3140,6 +3762,7 @@ export function VoucherSection({ userId, onAddTransaction, currentUserProfile }:
                           <tr>
                             <th className="p-2">Route</th>
                             <th className="p-2">Purpose</th>
+                            <th className="p-2">Person</th>
                             <th className="p-2 text-right">Fare</th>
                           </tr>
                         </thead>
@@ -3150,19 +3773,58 @@ export function VoucherSection({ userId, onAddTransaction, currentUserProfile }:
                                 {log.fromLocation} ➔ {log.toLocation}
                               </td>
                               <td className="p-2 text-slate-500 font-medium">{log.reason}</td>
+                              <td className="p-2 text-slate-600 font-semibold">{log.person || '-'}</td>
                               <td className="p-2 text-right font-bold text-emerald-600 font-mono">$ {log.amount}</td>
                             </tr>
                           ))}
                         </tbody>
                       </table>
                     </div>
-                  ) : approvingVoucher.category !== 'transport' && approvingVoucher.items && approvingVoucher.items.length > 0 ? (
+                  ) : approvingVoucher.category === 'salary' && approvingVoucher.salaryLogs && approvingVoucher.salaryLogs.length > 0 ? (
+                    <div className="overflow-x-auto border border-slate-200/60 rounded-xl max-h-[160px] overflow-y-auto">
+                      <table className="w-full text-[11px] text-left text-slate-600 font-sans">
+                        <thead className="bg-[#FAFAFA] text-[9.5px] font-bold text-slate-400 border-b border-slate-100">
+                          <tr>
+                            <th className="p-2">Employee</th>
+                            <th className="p-2">Month</th>
+                            <th className="p-2 text-right">Basic</th>
+                            <th className="p-2 text-right">House</th>
+                            <th className="p-2 text-right">Med</th>
+                            <th className="p-2 text-right">Trans</th>
+                            <th className="p-2 text-right">OT</th>
+                            <th className="p-2 text-right">Mob</th>
+                            <th className="p-2 text-right">Total</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100">
+                          {approvingVoucher.salaryLogs.map((s: SalaryLog, idx: number) => (
+                            <tr key={idx} className="hover:bg-slate-50">
+                              <td className="p-2 font-semibold whitespace-nowrap">{s.employeeName}</td>
+                              <td className="p-2 text-slate-500 whitespace-nowrap">{s.month}</td>
+                              <td className="p-2 text-right font-mono">{s.basicSalary.toLocaleString('en-US')}</td>
+                              <td className="p-2 text-right font-mono">{s.houseRent.toLocaleString('en-US')}</td>
+                              <td className="p-2 text-right font-mono">{s.medicalAllowance.toLocaleString('en-US')}</td>
+                              <td className="p-2 text-right font-mono">{s.transport.toLocaleString('en-US')}</td>
+                              <td className="p-2 text-right font-mono">{s.overtime.toLocaleString('en-US')}</td>
+                              <td className="p-2 text-right font-mono">{s.mobileBill.toLocaleString('en-US')}</td>
+                              <td className="p-2 text-right font-bold text-emerald-700 font-mono whitespace-nowrap">
+                                ৳ {s.totalAmount.toLocaleString('en-US')}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  ) : approvingVoucher.category !== 'transport' && approvingVoucher.category !== 'salary' && approvingVoucher.items && approvingVoucher.items.length > 0 ? (() => {
+                    const isBillMonth = isBillMonthCategory(approvingVoucher.category);
+                    const showQty = !isBillMonth;
+                    return (
                     <div className="overflow-hidden border border-slate-200/60 rounded-xl max-h-[140px] overflow-y-auto">
                       <table className="w-full text-xs text-left text-slate-600 font-sans">
                         <thead className="bg-[#FAFAFA] text-[10px] font-bold text-slate-400 border-b border-slate-100">
                           <tr>
-                            <th className="p-2">{approvingVoucher.category === 'office_rent' ? 'Rent Month' : 'Description'}</th>
-                            <th className="p-2 text-center">Qty</th>
+                            <th className="p-2">{approvingVoucher.category === 'office_rent' ? 'Rent Month' : isBillMonth ? 'Bill of Month' : 'Description'}</th>
+                            {showQty && <th className="p-2 text-center">Qty</th>}
                             <th className="p-2 text-right">Amount</th>
                           </tr>
                         </thead>
@@ -3170,16 +3832,19 @@ export function VoucherSection({ userId, onAddTransaction, currentUserProfile }:
                           {approvingVoucher.items.map((item: any, idx: number) => (
                             <tr key={idx} className="hover:bg-slate-50">
                               <td className="p-2 font-semibold">{item.description}</td>
-                              <td className="p-2 text-center text-slate-500 font-mono">
-                                {item.quantity} {item.uom === 'Month' ? 'Month' : item.uom}
-                              </td>
-                              <td className="p-2 text-right font-bold text-slate-800 font-mono">$ {item.amount}</td>
+                              {showQty && (
+                                <td className="p-2 text-center text-slate-500 font-mono">
+                                  {item.quantity} {item.uom === 'Month' ? 'Month' : item.uom}
+                                </td>
+                              )}
+                              <td className="p-2 text-right font-bold text-slate-800 font-mono">৳ {item.amount}</td>
                             </tr>
                           ))}
                         </tbody>
                       </table>
                     </div>
-                  ) : (
+                    );
+                  })() : (
                     <div className="p-3 bg-slate-50 text-slate-400 border border-slate-200 border-dashed rounded-xl text-center text-xs">
                       No item or route details have been submitted.
                     </div>
@@ -3405,11 +4070,14 @@ export function VoucherSection({ userId, onAddTransaction, currentUserProfile }:
                     placeholder="e.g., 1500"
                     value={editAmount}
                     onChange={(e) => setEditAmount(e.target.value)}
-                    disabled={editCategory === 'transport'}
+                    disabled={editCategory === 'transport' || editCategory === 'salary'}
                     className="w-full px-3.5 py-2.5 border border-slate-200 rounded-xl bg-slate-50/50 focus:outline-none focus:ring-1 focus:ring-indigo-500 text-slate-800 text-xs font-bold disabled:opacity-75 disabled:bg-slate-100"
                   />
                   {editCategory === 'transport' && (
                     <span className="text-[9px] text-indigo-600 font-bold mt-1 block">Automatically calculated from the route details below</span>
+                  )}
+                  {editCategory === 'salary' && (
+                    <span className="text-[9px] text-emerald-600 font-bold mt-1 block">Automatically calculated from the salary breakdown below</span>
                   )}
                 </div>
 
@@ -3418,11 +4086,18 @@ export function VoucherSection({ userId, onAddTransaction, currentUserProfile }:
                   <select
                     value={editCategory}
                     onChange={(e) => {
-                      setEditCategory(e.target.value);
-                      if (e.target.value !== 'transport') {
+                      const nextCat = e.target.value;
+                      setEditCategory(nextCat);
+                      if (nextCat !== 'transport') {
                         setEditTransportLogs([]);
                       } else {
                         const sum = editTransportLogs.reduce((acc, item) => acc + item.amount, 0);
+                        setEditAmount(sum.toString());
+                      }
+                      if (nextCat !== 'salary') {
+                        setEditSalaryLogs([]);
+                      } else {
+                        const sum = editSalaryLogs.reduce((acc, item) => acc + item.totalAmount, 0);
                         setEditAmount(sum.toString());
                       }
                     }}
@@ -3467,8 +4142,8 @@ export function VoucherSection({ userId, onAddTransaction, currentUserProfile }:
                     </div>
                   </div>
 
-                  <div className="grid grid-cols-2 gap-2">
-                    <div>
+                  <div className="grid grid-cols-12 gap-2">
+                    <div className="col-span-12 sm:col-span-5">
                       <label className="block text-[10px] font-bold text-slate-500 mb-0.5">Purpose / Medium *</label>
                       <input 
                         type="text" 
@@ -3478,7 +4153,17 @@ export function VoucherSection({ userId, onAddTransaction, currentUserProfile }:
                         className="w-full px-2.5 py-2.5 border border-slate-200 bg-white rounded-xl focus:outline-none focus:ring-1 focus:ring-indigo-400 text-slate-800 text-xs" 
                       />
                     </div>
-                    <div>
+                    <div className="col-span-6 sm:col-span-3">
+                      <label className="block text-[10px] font-bold text-slate-500 mb-0.5">Person</label>
+                      <input 
+                        type="text" 
+                        placeholder="Person name" 
+                        value={editTPerson}
+                        onChange={(e) => setEditTPerson(e.target.value)}
+                        className="w-full px-2.5 py-2.5 border border-slate-200 bg-white rounded-xl focus:outline-none focus:ring-1 focus:ring-indigo-400 text-slate-800 text-xs" 
+                      />
+                    </div>
+                    <div className="col-span-6 sm:col-span-4">
                       <label className="block text-[10px] font-bold text-slate-500 mb-0.5">Amount ($) *</label>
                       <div className="flex gap-1.5">
                         <input 
@@ -3514,6 +4199,7 @@ export function VoucherSection({ userId, onAddTransaction, currentUserProfile }:
                                 {log.fromLocation} ➔ {log.toLocation}
                               </td>
                               <td className="px-2 py-1.5 text-slate-400">{log.reason}</td>
+                              <td className="px-2 py-1.5 text-slate-600 font-semibold">{log.person || '-'}</td>
                               <td className="px-2 py-1.5 text-right font-mono font-bold">
                                 $ {log.amount}
                               </td>
@@ -3536,31 +4222,197 @@ export function VoucherSection({ userId, onAddTransaction, currentUserProfile }:
                 </div>
               )}
 
+              {/* Salary editing section inside Edit Modal */}
+              {editCategory === 'salary' && (
+                <div className="p-4 bg-emerald-50/50 border border-emerald-200/70 rounded-2xl space-y-3">
+                  <div className="flex items-center justify-between text-emerald-950 font-bold text-xs">
+                    <span>💼 Employee Salary Breakdown</span>
+                    <span className="text-[10px] font-mono font-extrabold text-emerald-700 bg-emerald-100/80 px-2 py-0.5 rounded-lg">
+                      Auto Total: ৳ {currentEditSalaryDraftTotal.toLocaleString('en-US')}
+                    </span>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-2">
+                    <div>
+                      <label className="block text-[10px] font-bold text-slate-500 mb-0.5">Employee Name *</label>
+                      <input
+                        type="text"
+                        placeholder="e.g., Md. Rahim"
+                        value={editSalEmpName}
+                        onChange={(e) => setEditSalEmpName(e.target.value)}
+                        className="w-full px-2.5 py-2 border border-slate-200 bg-white rounded-xl focus:outline-none focus:ring-1 focus:ring-emerald-500 text-slate-800 text-xs"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-bold text-slate-500 mb-0.5">Month *</label>
+                      <input
+                        type="text"
+                        placeholder="e.g., November 2026"
+                        value={editSalMonth}
+                        onChange={(e) => setEditSalMonth(e.target.value)}
+                        className="w-full px-2.5 py-2 border border-slate-200 bg-white rounded-xl focus:outline-none focus:ring-1 focus:ring-emerald-500 text-slate-800 text-xs"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-3 gap-2">
+                    <div>
+                      <label className="block text-[10px] font-bold text-slate-500 mb-0.5">Basic Salary</label>
+                      <input
+                        type="number"
+                        min="0"
+                        placeholder="0"
+                        value={editSalBasic}
+                        onChange={(e) => setEditSalBasic(e.target.value)}
+                        className="w-full px-2 py-2 border border-slate-200 bg-white rounded-xl focus:outline-none focus:ring-1 focus:ring-emerald-500 text-slate-800 text-xs font-mono font-bold"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-bold text-slate-500 mb-0.5">House Rent</label>
+                      <input
+                        type="number"
+                        min="0"
+                        placeholder="0"
+                        value={editSalHouseRent}
+                        onChange={(e) => setEditSalHouseRent(e.target.value)}
+                        className="w-full px-2 py-2 border border-slate-200 bg-white rounded-xl focus:outline-none focus:ring-1 focus:ring-emerald-500 text-slate-800 text-xs font-mono font-bold"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-bold text-slate-500 mb-0.5">Medical Allowance</label>
+                      <input
+                        type="number"
+                        min="0"
+                        placeholder="0"
+                        value={editSalMedical}
+                        onChange={(e) => setEditSalMedical(e.target.value)}
+                        className="w-full px-2 py-2 border border-slate-200 bg-white rounded-xl focus:outline-none focus:ring-1 focus:ring-emerald-500 text-slate-800 text-xs font-mono font-bold"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-bold text-slate-500 mb-0.5">Transport</label>
+                      <input
+                        type="number"
+                        min="0"
+                        placeholder="0"
+                        value={editSalTransport}
+                        onChange={(e) => setEditSalTransport(e.target.value)}
+                        className="w-full px-2 py-2 border border-slate-200 bg-white rounded-xl focus:outline-none focus:ring-1 focus:ring-emerald-500 text-slate-800 text-xs font-mono font-bold"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-bold text-slate-500 mb-0.5">Overtime</label>
+                      <input
+                        type="number"
+                        min="0"
+                        placeholder="0"
+                        value={editSalOvertime}
+                        onChange={(e) => setEditSalOvertime(e.target.value)}
+                        className="w-full px-2 py-2 border border-slate-200 bg-white rounded-xl focus:outline-none focus:ring-1 focus:ring-emerald-500 text-slate-800 text-xs font-mono font-bold"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-bold text-slate-500 mb-0.5">Mobile Bill</label>
+                      <input
+                        type="number"
+                        min="0"
+                        placeholder="0"
+                        value={editSalMobileBill}
+                        onChange={(e) => setEditSalMobileBill(e.target.value)}
+                        className="w-full px-2 py-2 border border-slate-200 bg-white rounded-xl focus:outline-none focus:ring-1 focus:ring-emerald-500 text-slate-800 text-xs font-mono font-bold"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-12 gap-2 items-end pt-1">
+                    <div className="col-span-6">
+                      <label className="block text-[10px] font-bold text-emerald-800 mb-0.5">Total Amount (৳)</label>
+                      <input
+                        type="text"
+                        readOnly
+                        value={currentEditSalaryDraftTotal.toLocaleString('en-US')}
+                        className="w-full px-3 py-2 border border-emerald-200 bg-emerald-100/60 text-emerald-900 rounded-xl text-xs font-mono font-extrabold cursor-not-allowed"
+                      />
+                    </div>
+                    <div className="col-span-6">
+                      <button
+                        type="button"
+                        onClick={handleAddEditSalaryLog}
+                        className="w-full py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-xl transition cursor-pointer flex items-center justify-center gap-1.5"
+                      >
+                        <PlusCircle className="w-3.5 h-3.5" />
+                        <span>Add Salary Entry</span>
+                      </button>
+                    </div>
+                  </div>
+
+                  {editSalaryLogs.length > 0 && (
+                    <div className="border border-emerald-200 rounded-xl overflow-x-auto bg-white">
+                      <div className="bg-emerald-100/40 px-2.5 py-1 text-[10px] font-bold text-emerald-950 flex justify-between border-b border-emerald-100">
+                        <span>Added Salary Entries</span>
+                        <span className="font-mono">
+                          Total: ৳ {editSalaryLogs.reduce((acc, s) => acc + s.totalAmount, 0).toLocaleString('en-US')}
+                        </span>
+                      </div>
+                      <table className="w-full text-slate-700 text-[10px] leading-tight">
+                        <tbody>
+                          {editSalaryLogs.map((s, sIdx) => (
+                            <tr key={sIdx} className="border-b border-slate-100 hover:bg-slate-50/50">
+                              <td className="px-2 py-1.5 font-bold whitespace-nowrap">{s.employeeName}</td>
+                              <td className="px-2 py-1.5 text-slate-500 whitespace-nowrap">{s.month}</td>
+                              <td className="px-2 py-1.5 text-right font-mono font-bold text-emerald-700 whitespace-nowrap">
+                                ৳ {s.totalAmount.toLocaleString('en-US')}
+                              </td>
+                              <td className="px-2 py-1.5 text-right">
+                                <button
+                                  type="button"
+                                  onClick={() => handleRemoveEditSalaryLog(sIdx)}
+                                  className="text-rose-500 hover:text-rose-700 font-bold cursor-pointer"
+                                  title="Delete"
+                                >
+                                  ✕
+                                </button>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+              )}
+
               {/* Items editing section for non-transport categories inside Edit Modal */}
-              {editCategory !== 'transport' && (
+              {editCategory !== 'transport' && editCategory !== 'salary' && (() => {
+                const isBillMonth = isBillMonthCategory(editCategory);
+                const showUom = editCategory !== 'office_rent' && !isBillMonth;
+                const showQty = !isBillMonth;
+                return (
                 <div className="p-4 bg-indigo-50/40 border border-slate-200/60 rounded-2xl space-y-3">
                   <div className="flex items-center gap-1.5 text-slate-800 font-bold text-xs select-none">
                     <span>{editCategory === 'office_rent' ? '🏢 Office Rent Statement List' : '📋 Voucher Item List (Optional)'}</span>
                   </div>
                   
                   <div className="grid grid-cols-12 gap-2 text-[10px] font-bold text-slate-500 select-none">
-                    <div className="col-span-5">{editCategory === 'office_rent' ? 'Rent Month *' : 'Item Description *'}</div>
-                    {editCategory !== 'office_rent' && <div className="col-span-2">UoM *</div>}
-                    <div className={editCategory === 'office_rent' ? 'col-span-3' : 'col-span-2'}>Qty *</div>
-                    <div className={editCategory === 'office_rent' ? 'col-span-4' : 'col-span-3'}>Amount *</div>
+                    <div className={isBillMonth ? 'col-span-7' : 'col-span-5'}>
+                      {editCategory === 'office_rent' ? 'Rent Month *' : isBillMonth ? 'Bill of Month *' : 'Item Description *'}
+                    </div>
+                    {showUom && <div className="col-span-2">UoM *</div>}
+                    {showQty && <div className={editCategory === 'office_rent' ? 'col-span-3' : 'col-span-2'}>Qty *</div>}
+                    <div className={isBillMonth ? 'col-span-5' : editCategory === 'office_rent' ? 'col-span-4' : 'col-span-3'}>Amount *</div>
                   </div>
 
                   <div className="grid grid-cols-12 gap-2">
-                    <div className="col-span-5">
+                    <div className={isBillMonth ? 'col-span-7' : 'col-span-5'}>
                       <input 
                         type="text" 
-                        placeholder={editCategory === 'office_rent' ? 'e.g., January 2026' : 'e.g., Notebook and Pen'} 
+                        placeholder={editCategory === 'office_rent' ? 'e.g., January 2026' : isBillMonth ? 'e.g., November 2026' : 'e.g., Notebook and Pen'} 
                         value={editItemDesc}
                         onChange={(e) => setEditItemDesc(e.target.value)}
                         className="w-full px-2.5 py-1.5 border border-slate-200 bg-white rounded-xl focus:outline-none focus:ring-1 focus:ring-indigo-400 text-slate-800 text-xs" 
                       />
                     </div>
-                    {editCategory !== 'office_rent' && (
+                    {showUom && (
                       <div className="col-span-2">
                         <select
                           value={editItemUom}
@@ -3580,16 +4432,18 @@ export function VoucherSection({ userId, onAddTransaction, currentUserProfile }:
                         </select>
                       </div>
                     )}
-                    <div className={editCategory === 'office_rent' ? 'col-span-3' : 'col-span-2'}>
-                      <input 
-                        type="number" 
-                        placeholder={editCategory === 'office_rent' ? 'e.g., 1' : 'qty'} 
-                        value={editItemQty}
-                        onChange={(e) => setEditItemQty(e.target.value)}
-                        className="w-full px-1 py-1.5 border border-slate-200 bg-white rounded-xl focus:outline-none focus:ring-1 focus:ring-indigo-400 text-slate-800 text-xs font-mono font-bold text-center" 
-                      />
-                    </div>
-                    <div className={editCategory === 'office_rent' ? 'col-span-4 flex gap-1' : 'col-span-3 flex gap-1'}>
+                    {showQty && (
+                      <div className={editCategory === 'office_rent' ? 'col-span-3' : 'col-span-2'}>
+                        <input 
+                          type="number" 
+                          placeholder={editCategory === 'office_rent' ? 'e.g., 1' : 'qty'} 
+                          value={editItemQty}
+                          onChange={(e) => setEditItemQty(e.target.value)}
+                          className="w-full px-1 py-1.5 border border-slate-200 bg-white rounded-xl focus:outline-none focus:ring-1 focus:ring-indigo-400 text-slate-800 text-xs font-mono font-bold text-center" 
+                        />
+                      </div>
+                    )}
+                    <div className={`${isBillMonth ? 'col-span-5' : editCategory === 'office_rent' ? 'col-span-4' : 'col-span-3'} flex gap-1`}>
                       <input 
                         type="number" 
                         placeholder="Amount" 
@@ -3615,9 +4469,11 @@ export function VoucherSection({ userId, onAddTransaction, currentUserProfile }:
                         <thead className="bg-[#FAFAFA] text-[9px] text-slate-400 font-extrabold uppercase border-b border-slate-100">
                           <tr>
                             <th className="px-2 py-1.5 text-center">SL</th>
-                            <th className="px-2 py-1.5 text-left">{editCategory === 'office_rent' ? 'Rent Month' : 'Description'}</th>
-                            {editCategory !== 'office_rent' && <th className="px-2 py-1.5 text-center">UoM</th>}
-                            <th className="px-2 py-1.5 text-center">Qty</th>
+                            <th className="px-2 py-1.5 text-left">
+                              {editCategory === 'office_rent' ? 'Rent Month' : isBillMonth ? 'Bill of Month' : 'Description'}
+                            </th>
+                            {showUom && <th className="px-2 py-1.5 text-center">UoM</th>}
+                            {showQty && <th className="px-2 py-1.5 text-center">Qty</th>}
                             <th className="px-1.5 py-1.5 text-right">Amount</th>
                             <th className="px-2 py-1.5 text-center">Delete</th>
                           </tr>
@@ -3627,10 +4483,12 @@ export function VoucherSection({ userId, onAddTransaction, currentUserProfile }:
                             <tr key={idx} className="hover:bg-slate-50/50">
                               <td className="px-2 py-1.5 text-center font-bold text-slate-400">{item.sn}</td>
                               <td className="px-2 py-1.5 font-bold text-slate-800">{item.description}</td>
-                              {editCategory !== 'office_rent' && <td className="px-2 py-1.5 text-center text-slate-500">{item.uom}</td>}
-                              <td className="px-2 py-1.5 text-center font-bold font-mono">
-                                {item.quantity} {item.uom === 'Month' ? 'Month' : item.uom}
-                              </td>
+                              {showUom && <td className="px-2 py-1.5 text-center text-slate-500">{item.uom}</td>}
+                              {showQty && (
+                                <td className="px-2 py-1.5 text-center font-bold font-mono">
+                                  {item.quantity} {item.uom === 'Month' ? 'Month' : item.uom}
+                                </td>
+                              )}
                               <td className="px-1.5 py-1.5 text-right font-black text-slate-800 font-mono">
                                 ৳ {item.amount.toLocaleString('en-US')}
                               </td>
@@ -3649,12 +4507,13 @@ export function VoucherSection({ userId, onAddTransaction, currentUserProfile }:
                         </tbody>
                       </table>
                       <div className="bg-[#FAFAFA] p-1.5 text-right border-t border-slate-100 text-[9px] font-black text-slate-500">
-                        Total {editCategory === 'office_rent' ? 'Rent' : 'Item Value'}: <span className="font-mono text-slate-900 font-extrabold text-[10px]">৳ {editVoucherItems.reduce((acc, item) => acc + item.amount, 0).toLocaleString('en-US')}</span>
+                        Total {editCategory === 'office_rent' ? 'Rent' : isBillMonth ? 'Bill' : 'Item Value'}: <span className="font-mono text-slate-900 font-extrabold text-[10px]">৳ {editVoucherItems.reduce((acc, item) => acc + item.amount, 0).toLocaleString('en-US')}</span>
                       </div>
                     </div>
                   )}
                 </div>
-              )}
+                );
+              })()}
 
               <div className="grid grid-cols-2 gap-4">
                 <div>
