@@ -84,15 +84,27 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile, 
   const [openingSsl, setOpeningSsl] = useState<string>('0');
 
   // Cash Drawer statement inputs (States)
+  const [khaOpening, setKhaOpening] = useState<string>('0');
+  const [dhakaOpening, setDhakaOpening] = useState<string>('0');
+  const [nayanOpening, setNayanOpening] = useState<string>('0');
+  const [accountOpening, setAccountOpening] = useState<string>('0');
+
   const [khaOfficeCash, setKhaOfficeCash] = useState<string>('0');
   const [dhakaOfficeCash, setDhakaOfficeCash] = useState<string>('0');
   const [nayanCash, setNayanCash] = useState<string>('0');
   const [accountCash, setAccountCash] = useState<string>('0');
 
-  const [transferKhaToNayan, setTransferKhaToNayan] = useState<string>('0');
-  const [transferNayanToDhaka, setTransferNayanToDhaka] = useState<string>('0');
-  const [transferDhakaToNayan, setTransferDhakaToNayan] = useState<string>('0');
-  const [transferDhakaToKha, setTransferDhakaToKha] = useState<string>('0');
+  const [transferKhaDhakaOpening, setTransferKhaDhakaOpening] = useState<string>('0');
+  const [transferKhaDhakaToday, setTransferKhaDhakaToday] = useState<string>('0');
+
+  const [transferDhakaKhaOpening, setTransferDhakaKhaOpening] = useState<string>('0');
+  const [transferDhakaKhaToday, setTransferDhakaKhaToday] = useState<string>('0');
+
+  const [transferBkashAccountOpening, setTransferBkashAccountOpening] = useState<string>('0');
+  const [transferBkashAccountToday, setTransferBkashAccountToday] = useState<string>('0');
+
+  const [transferAccountDhakaOpening, setTransferAccountDhakaOpening] = useState<string>('0');
+  const [transferAccountDhakaToday, setTransferAccountDhakaToday] = useState<string>('0');
 
   const [notes, setNotes] = useState<string>('');
   const [isDrawerSubmitted, setIsDrawerSubmitted] = useState<boolean>(false);
@@ -367,6 +379,97 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile, 
     return balances;
   };
 
+  // Helper: compute prior drawer (Cash Summary & Transfer Money) Total Amounts for targetDate.
+  // The Total Amount from the most recent closing before targetDate automatically carries forward
+  // to become the Opening Balance for targetDate.
+  const getPriorDrawerTotals = (targetDate: string) => {
+    if (!targetDate) {
+      return {
+        khaOpening: 0,
+        dhakaOpening: 0,
+        nayanOpening: 0,
+        accountOpening: 0,
+        transfer1Opening: 0,
+        transfer2Opening: 0,
+        transfer3Opening: 0,
+        transfer4Opening: 0,
+      };
+    }
+
+    const priorClosings = closings
+      .filter((c) => {
+        if (!c.date || c.date >= targetDate) return false;
+        return (
+          c.isDrawerSubmitted ||
+          c.status === 'closed' ||
+          c.khaOpeningCash !== undefined ||
+          c.transferKhaDhakaOpening !== undefined ||
+          (c.khaOfficeCash ?? 0) > 0 ||
+          (c.dhakaOfficeCash ?? 0) > 0 ||
+          (c.nayanCash ?? 0) > 0 ||
+          (c.accountCash ?? 0) > 0 ||
+          (c.transferKhaToNayan ?? 0) > 0 ||
+          (c.transferNayanToDhaka ?? 0) > 0 ||
+          (c.transferDhakaToNayan ?? 0) > 0 ||
+          (c.transferDhakaToKha ?? 0) > 0
+        );
+      })
+      .sort((a, b) => b.date.localeCompare(a.date));
+
+    if (priorClosings.length === 0) {
+      return {
+        khaOpening: 0,
+        dhakaOpening: 0,
+        nayanOpening: 0,
+        accountOpening: 0,
+        transfer1Opening: 0,
+        transfer2Opening: 0,
+        transfer3Opening: 0,
+        transfer4Opening: 0,
+      };
+    }
+
+    const p = priorClosings[0];
+    const calcTotal = (
+      totalField: number | undefined,
+      openField: number | undefined,
+      todayField: number | undefined
+    ) => {
+      if (totalField !== undefined && totalField !== null && !isNaN(totalField)) {
+        return Number(totalField);
+      }
+      return (Number(openField) || 0) + (Number(todayField) || 0);
+    };
+
+    return {
+      khaOpening: calcTotal(p.khaOfficeCash, p.khaOpeningCash, p.khaTodayCash),
+      dhakaOpening: calcTotal(p.dhakaOfficeCash, p.dhakaOpeningCash, p.dhakaTodayCash),
+      nayanOpening: calcTotal(p.nayanCash, p.nayanOpeningCash, p.nayanTodayCash),
+      accountOpening: calcTotal(p.accountCash, p.accountOpeningCash, p.accountTodayCash),
+
+      transfer1Opening: calcTotal(
+        p.transferKhaDhakaTotal ?? p.transferKhaToNayan,
+        p.transferKhaDhakaOpening,
+        p.transferKhaDhakaToday
+      ),
+      transfer2Opening: calcTotal(
+        p.transferDhakaKhaTotal ?? p.transferNayanToDhaka,
+        p.transferDhakaKhaOpening,
+        p.transferDhakaKhaToday
+      ),
+      transfer3Opening: calcTotal(
+        p.transferBkashAccountTotal ?? p.transferDhakaToNayan,
+        p.transferBkashAccountOpening,
+        p.transferBkashAccountToday
+      ),
+      transfer4Opening: calcTotal(
+        p.transferAccountDhakaTotal ?? p.transferDhakaToKha,
+        p.transferAccountDhakaOpening,
+        p.transferAccountDhakaToday
+      ),
+    };
+  };
+
   // Helper: compute category-wise income & expense breakdown for any transaction list
   const computeCategoryBreakdown = (txList: Transaction[]) => {
     const incomeCategoryMap: Record<string, { key: string; label: string; amount: number; count: number }> = {
@@ -474,9 +577,20 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile, 
     const closedDaysCount = monthClosings.filter((c) => c.status === 'closed').length;
     const latestDrawerDoc = monthClosings.find((c) => c.isDrawerSubmitted || c.status === 'closed') || null;
 
+    const totalTransferKhaDhakaOpening = monthClosings.reduce((s, c) => s + (c.transferKhaDhakaOpening ?? 0), 0);
+    const totalTransferKhaDhakaToday = monthClosings.reduce((s, c) => s + (c.transferKhaDhakaToday ?? (c.transferKhaDhakaOpening === undefined ? c.transferKhaToNayan ?? 0 : 0)), 0);
     const totalTransferKhaToNayan = monthClosings.reduce((s, c) => s + (c.transferKhaToNayan ?? 0), 0);
+
+    const totalTransferDhakaKhaOpening = monthClosings.reduce((s, c) => s + (c.transferDhakaKhaOpening ?? 0), 0);
+    const totalTransferDhakaKhaToday = monthClosings.reduce((s, c) => s + (c.transferDhakaKhaToday ?? (c.transferDhakaKhaOpening === undefined ? c.transferNayanToDhaka ?? 0 : 0)), 0);
     const totalTransferNayanToDhaka = monthClosings.reduce((s, c) => s + (c.transferNayanToDhaka ?? 0), 0);
+
+    const totalTransferBkashAccountOpening = monthClosings.reduce((s, c) => s + (c.transferBkashAccountOpening ?? 0), 0);
+    const totalTransferBkashAccountToday = monthClosings.reduce((s, c) => s + (c.transferBkashAccountToday ?? (c.transferBkashAccountOpening === undefined ? c.transferDhakaToNayan ?? 0 : 0)), 0);
     const totalTransferDhakaToNayan = monthClosings.reduce((s, c) => s + (c.transferDhakaToNayan ?? 0), 0);
+
+    const totalTransferAccountDhakaOpening = monthClosings.reduce((s, c) => s + (c.transferAccountDhakaOpening ?? 0), 0);
+    const totalTransferAccountDhakaToday = monthClosings.reduce((s, c) => s + (c.transferAccountDhakaToday ?? (c.transferAccountDhakaOpening === undefined ? c.transferDhakaToKha ?? 0 : 0)), 0);
     const totalTransferDhakaToKha = monthClosings.reduce((s, c) => s + (c.transferDhakaToKha ?? 0), 0);
 
     const { incomeCategories, expenseCategories } = computeCategoryBreakdown(monthTxs);
@@ -509,11 +623,55 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile, 
       discountNotes: monthlyDues[safeMonth]?.discountNotes || '',
       closedDaysCount,
       latestDrawerDoc,
+      physicalCash: latestDrawerDoc ? {
+        khaOpening: latestDrawerDoc.khaOpeningCash ?? 0,
+        khaToday: latestDrawerDoc.khaTodayCash ?? (latestDrawerDoc.khaOpeningCash === undefined ? latestDrawerDoc.khaOfficeCash ?? 0 : 0),
+        khaTotal: latestDrawerDoc.khaOfficeCash ?? 0,
+
+        dhakaOpening: latestDrawerDoc.dhakaOpeningCash ?? 0,
+        dhakaToday: latestDrawerDoc.dhakaTodayCash ?? (latestDrawerDoc.dhakaOpeningCash === undefined ? latestDrawerDoc.dhakaOfficeCash ?? 0 : 0),
+        dhakaTotal: latestDrawerDoc.dhakaOfficeCash ?? 0,
+
+        nayanOpening: latestDrawerDoc.nayanOpeningCash ?? 0,
+        nayanToday: latestDrawerDoc.nayanTodayCash ?? (latestDrawerDoc.nayanOpeningCash === undefined ? latestDrawerDoc.nayanCash ?? 0 : 0),
+        nayanTotal: latestDrawerDoc.nayanCash ?? 0,
+
+        accountOpening: latestDrawerDoc.accountOpeningCash ?? 0,
+        accountToday: latestDrawerDoc.accountTodayCash ?? (latestDrawerDoc.accountOpeningCash === undefined ? latestDrawerDoc.accountCash ?? 0 : 0),
+        accountTotal: latestDrawerDoc.accountCash ?? 0,
+
+        totalOpening: (latestDrawerDoc.khaOpeningCash ?? 0) + (latestDrawerDoc.dhakaOpeningCash ?? 0) + (latestDrawerDoc.nayanOpeningCash ?? 0) + (latestDrawerDoc.accountOpeningCash ?? 0),
+        totalToday: (latestDrawerDoc.khaTodayCash ?? (latestDrawerDoc.khaOpeningCash === undefined ? latestDrawerDoc.khaOfficeCash ?? 0 : 0)) +
+                    (latestDrawerDoc.dhakaTodayCash ?? (latestDrawerDoc.dhakaOpeningCash === undefined ? latestDrawerDoc.dhakaOfficeCash ?? 0 : 0)) +
+                    (latestDrawerDoc.nayanTodayCash ?? (latestDrawerDoc.nayanOpeningCash === undefined ? latestDrawerDoc.nayanCash ?? 0 : 0)) +
+                    (latestDrawerDoc.accountTodayCash ?? (latestDrawerDoc.accountOpeningCash === undefined ? latestDrawerDoc.accountCash ?? 0 : 0)),
+        total: (latestDrawerDoc.khaOfficeCash ?? 0) + (latestDrawerDoc.dhakaOfficeCash ?? 0) + (latestDrawerDoc.nayanCash ?? 0) + (latestDrawerDoc.accountCash ?? 0),
+      } : {
+        khaOpening: 0, khaToday: 0, khaTotal: 0,
+        dhakaOpening: 0, dhakaToday: 0, dhakaTotal: 0,
+        nayanOpening: 0, nayanToday: 0, nayanTotal: 0,
+        accountOpening: 0, accountToday: 0, accountTotal: 0,
+        totalOpening: 0, totalToday: 0, total: 0,
+      },
       transfers: {
+        khaDhakaOpening: totalTransferKhaDhakaOpening,
+        khaDhakaToday: totalTransferKhaDhakaToday,
         khaToNayan: totalTransferKhaToNayan,
+
+        dhakaKhaOpening: totalTransferDhakaKhaOpening,
+        dhakaKhaToday: totalTransferDhakaKhaToday,
         nayanToDhaka: totalTransferNayanToDhaka,
+
+        bkashAccountOpening: totalTransferBkashAccountOpening,
+        bkashAccountToday: totalTransferBkashAccountToday,
         dhakaToNayan: totalTransferDhakaToNayan,
+
+        accountDhakaOpening: totalTransferAccountDhakaOpening,
+        accountDhakaToday: totalTransferAccountDhakaToday,
         dhakaToKha: totalTransferDhakaToKha,
+
+        totalOpening: totalTransferKhaDhakaOpening + totalTransferDhakaKhaOpening + totalTransferBkashAccountOpening + totalTransferAccountDhakaOpening,
+        totalToday: totalTransferKhaDhakaToday + totalTransferDhakaKhaToday + totalTransferBkashAccountToday + totalTransferAccountDhakaToday,
         total: totalTransferKhaToNayan + totalTransferNayanToDhaka + totalTransferDhakaToNayan + totalTransferDhakaToKha,
       },
     };
@@ -662,22 +820,50 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile, 
       if (summary.latestDrawerDoc) {
         doc.setFontSize(9.5);
         doc.setTextColor(15, 23, 42);
-        doc.text(`Latest Cash Details (${summary.latestDrawerDoc.date}) & Monthly Transfers`, 14, nextY);
+        doc.text(`Cash Summary Details (${summary.latestDrawerDoc.date})`, 14, nextY);
         autoTable(doc, {
           startY: nextY + 3,
-          head: [['Physical Cash Snapshot', 'Amount', 'Monthly Transfers Total', 'Amount']],
+          head: [['Cash Summary Details', 'Opening Balance', 'Today Amount', 'Total Amount']],
           body: [
-            ['KHA Office Cash', `${(summary.latestDrawerDoc.khaOfficeCash ?? 0).toLocaleString()} BDT`, 'KHA Office to Nayan', `${summary.transfers.khaToNayan.toLocaleString()} BDT`],
-            ['Dhaka Office Cash', `${(summary.latestDrawerDoc.dhakaOfficeCash ?? 0).toLocaleString()} BDT`, 'Nayan to Dhaka office', `${summary.transfers.nayanToDhaka.toLocaleString()} BDT`],
-            ['Nayan Cash', `${(summary.latestDrawerDoc.nayanCash ?? 0).toLocaleString()} BDT`, 'Dhaka office to Nayan', `${summary.transfers.dhakaToNayan.toLocaleString()} BDT`],
-            ['Account Cash', `${(summary.latestDrawerDoc.accountCash ?? 0).toLocaleString()} BDT`, 'Dhaka to KHA Office', `${summary.transfers.dhakaToKha.toLocaleString()} BDT`],
+            ['Khagrachari Office Cash', `${summary.physicalCash.khaOpening.toLocaleString()} BDT`, `${summary.physicalCash.khaToday.toLocaleString()} BDT`, `${summary.physicalCash.khaTotal.toLocaleString()} BDT`],
+            ['Dhaka Office Cash', `${summary.physicalCash.dhakaOpening.toLocaleString()} BDT`, `${summary.physicalCash.dhakaToday.toLocaleString()} BDT`, `${summary.physicalCash.dhakaTotal.toLocaleString()} BDT`],
+            ['bKash Merchants Cash', `${summary.physicalCash.nayanOpening.toLocaleString()} BDT`, `${summary.physicalCash.nayanToday.toLocaleString()} BDT`, `${summary.physicalCash.nayanTotal.toLocaleString()} BDT`],
+            ['Khagrachari Account Cash (P)', `${summary.physicalCash.accountOpening.toLocaleString()} BDT`, `${summary.physicalCash.accountToday.toLocaleString()} BDT`, `${summary.physicalCash.accountTotal.toLocaleString()} BDT`],
+            ['Total Physical Cash', `${summary.physicalCash.totalOpening.toLocaleString()} BDT`, `${summary.physicalCash.totalToday.toLocaleString()} BDT`, `${summary.physicalCash.total.toLocaleString()} BDT`],
           ],
           theme: 'grid',
           headStyles: { fillColor: [71, 85, 105], textColor: 255, fontSize: 8 },
-          bodyStyles: { fontSize: 8 },
+          bodyStyles: { fontSize: 7.5 },
           columnStyles: {
+            0: { cellWidth: 70 },
             1: { halign: 'right' },
-            3: { halign: 'right' },
+            2: { halign: 'right' },
+            3: { halign: 'right', fontStyle: 'bold', textColor: [67, 56, 202] },
+          },
+        });
+        nextY = (doc as any).lastAutoTable.finalY + 6;
+
+        doc.setFontSize(9.5);
+        doc.setTextColor(15, 23, 42);
+        doc.text(`Monthly Cash Transfers (${summary.month})`, 14, nextY);
+        autoTable(doc, {
+          startY: nextY + 3,
+          head: [['Monthly Cash Transfers Details', 'Opening Balance', 'Month Amount', 'Total Amount']],
+          body: [
+            ['Khagrachari Office to Dhaka Office', `${summary.transfers.khaDhakaOpening.toLocaleString()} BDT`, `${summary.transfers.khaDhakaToday.toLocaleString()} BDT`, `${summary.transfers.khaToNayan.toLocaleString()} BDT`],
+            ['Dhaka Office to Khagrachari Office', `${summary.transfers.dhakaKhaOpening.toLocaleString()} BDT`, `${summary.transfers.dhakaKhaToday.toLocaleString()} BDT`, `${summary.transfers.nayanToDhaka.toLocaleString()} BDT`],
+            ['bKash Merchants to Khagrachari Account', `${summary.transfers.bkashAccountOpening.toLocaleString()} BDT`, `${summary.transfers.bkashAccountToday.toLocaleString()} BDT`, `${summary.transfers.dhakaToNayan.toLocaleString()} BDT`],
+            ['Khagrachari Account to Dhaka Office', `${summary.transfers.accountDhakaOpening.toLocaleString()} BDT`, `${summary.transfers.accountDhakaToday.toLocaleString()} BDT`, `${summary.transfers.dhakaToKha.toLocaleString()} BDT`],
+            ['Total Transfers', `${summary.transfers.totalOpening.toLocaleString()} BDT`, `${summary.transfers.totalToday.toLocaleString()} BDT`, `${summary.transfers.total.toLocaleString()} BDT`],
+          ],
+          theme: 'grid',
+          headStyles: { fillColor: [71, 85, 105], textColor: 255, fontSize: 8 },
+          bodyStyles: { fontSize: 7.5 },
+          columnStyles: {
+            0: { cellWidth: 70 },
+            1: { halign: 'right' },
+            2: { halign: 'right' },
+            3: { halign: 'right', fontStyle: 'bold', textColor: [67, 56, 202] },
           },
         });
         nextY = (doc as any).lastAutoTable.finalY + 8;
@@ -848,12 +1034,19 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile, 
         ...summary.methods.map((m) => [m.label, m.open, m.income, m.expense, m.close, m.pl]),
         ['TOTAL', summary.totalOpen, summary.totalIncome, summary.totalExpense, summary.totalClose, summary.totalPL],
         [],
-        ['LATEST PHYSICAL CASH', summary.latestDrawerDoc ? summary.latestDrawerDoc.date : 'No Entry', '', 'MONTHLY CASH TRANSFERS', summary.month],
-        ['KHA Office Cash', summary.latestDrawerDoc?.khaOfficeCash ?? 0, '', 'KHA Office to Nayan', summary.transfers.khaToNayan],
-        ['Dhaka Office Cash', summary.latestDrawerDoc?.dhakaOfficeCash ?? 0, '', 'Nayan to Dhaka office', summary.transfers.nayanToDhaka],
-        ['Nayan Cash', summary.latestDrawerDoc?.nayanCash ?? 0, '', 'Dhaka office to Nayan', summary.transfers.dhakaToNayan],
-        ['Account Cash', summary.latestDrawerDoc?.accountCash ?? 0, '', 'Dhaka office to KHA Office', summary.transfers.dhakaToKha],
-        ['Total Physical Cash', latestCashTotal, '', 'Total Transfers', summary.transfers.total],
+        ['CASH SUMMARY DETAILS (LATEST SNAPSHOT)', 'OPENING BALANCE (BDT)', 'TODAY AMOUNT (BDT)', 'TOTAL AMOUNT (BDT)'],
+        ['Khagrachari Office Cash', summary.physicalCash.khaOpening, summary.physicalCash.khaToday, summary.physicalCash.khaTotal],
+        ['Dhaka Office Cash', summary.physicalCash.dhakaOpening, summary.physicalCash.dhakaToday, summary.physicalCash.dhakaTotal],
+        ['bKash Merchants Cash', summary.physicalCash.nayanOpening, summary.physicalCash.nayanToday, summary.physicalCash.nayanTotal],
+        ['Khagrachari Account Cash (P)', summary.physicalCash.accountOpening, summary.physicalCash.accountToday, summary.physicalCash.accountTotal],
+        ['TOTAL PHYSICAL CASH', summary.physicalCash.totalOpening, summary.physicalCash.totalToday, summary.physicalCash.total],
+        [],
+        ['MONTHLY CASH TRANSFERS DETAILS', 'OPENING BALANCE (BDT)', 'MONTH AMOUNT (BDT)', 'TOTAL AMOUNT (BDT)'],
+        ['Khagrachari Office to Dhaka Office', summary.transfers.khaDhakaOpening, summary.transfers.khaDhakaToday, summary.transfers.khaToNayan],
+        ['Dhaka Office to Khagrachari Office', summary.transfers.dhakaKhaOpening, summary.transfers.dhakaKhaToday, summary.transfers.nayanToDhaka],
+        ['bKash Merchants to Khagrachari Account', summary.transfers.bkashAccountOpening, summary.transfers.bkashAccountToday, summary.transfers.dhakaToNayan],
+        ['Khagrachari Account to Dhaka Office', summary.transfers.accountDhakaOpening, summary.transfers.accountDhakaToday, summary.transfers.dhakaToKha],
+        ['TOTAL TRANSFERS', summary.transfers.totalOpening, summary.transfers.totalToday, summary.transfers.total],
         [],
         ['CATEGORY-WISE INCOME STATEMENT', 'ENTRIES', 'AMOUNT (BDT)'],
         ...summary.incomeCategories.map((c) => [c.label, c.count, c.amount]),
@@ -1171,29 +1364,81 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile, 
                 </div>
               </div>
 
-              <div class="grid-2">
-                <div class="section" style="margin-bottom: 0;">
-                  <div class="section-title">
-                    <span>Latest Physical Cash</span>
+              <div class="grid-2" style="align-items: stretch;">
+                <div class="section" style="margin-bottom: 0; padding: 8px 9px;">
+                  <div class="section-title" style="margin-bottom: 5px; padding-bottom: 4px;">
+                    <span>Cash Summary Details (Latest)</span>
                     <span>${summary.latestDrawerDoc ? summary.latestDrawerDoc.date : 'No Entry'}</span>
                   </div>
-                  <div class="row-item"><span>KHA Office Cash</span><span class="bold">${(summary.latestDrawerDoc?.khaOfficeCash ?? 0).toLocaleString()} BDT</span></div>
-                  <div class="row-item"><span>Dhaka Office Cash</span><span class="bold">${(summary.latestDrawerDoc?.dhakaOfficeCash ?? 0).toLocaleString()} BDT</span></div>
-                  <div class="row-item"><span>Nayan Cash</span><span class="bold">${(summary.latestDrawerDoc?.nayanCash ?? 0).toLocaleString()} BDT</span></div>
-                  <div class="row-item"><span>Account Cash</span><span class="bold">${(summary.latestDrawerDoc?.accountCash ?? 0).toLocaleString()} BDT</span></div>
-                  <div class="row-total"><span>Total Physical Cash</span><span>${latestCashTotal.toLocaleString()} BDT</span></div>
+                  <table style="font-size: 8.5px;">
+                    <thead>
+                      <tr>
+                        <th style="padding: 3px 2px; font-size: 7px;">Description</th>
+                        <th class="num" style="padding: 3px 2px; font-size: 7px; white-space: nowrap;">Opening Balance</th>
+                        <th class="num" style="padding: 3px 2px; font-size: 7px; white-space: nowrap;">Today Amount</th>
+                        <th class="num" style="padding: 3px 2px; font-size: 7px; white-space: nowrap;">Total Amount</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      ${[
+                        { label: 'Khagrachari Office Cash', open: summary.physicalCash.khaOpening, today: summary.physicalCash.khaToday, total: summary.physicalCash.khaTotal },
+                        { label: 'Dhaka Office Cash', open: summary.physicalCash.dhakaOpening, today: summary.physicalCash.dhakaToday, total: summary.physicalCash.dhakaTotal },
+                        { label: 'bKash Merchants Cash', open: summary.physicalCash.nayanOpening, today: summary.physicalCash.nayanToday, total: summary.physicalCash.nayanTotal },
+                        { label: 'Khagrachari Account Cash (P)', open: summary.physicalCash.accountOpening, today: summary.physicalCash.accountToday, total: summary.physicalCash.accountTotal },
+                      ].map((item) => `
+                        <tr>
+                          <td class="bold" style="padding: 3.5px 2px;">${item.label}</td>
+                          <td class="num" style="padding: 3.5px 2px; white-space: nowrap;">${item.open.toLocaleString()} ৳</td>
+                          <td class="num" style="padding: 3.5px 2px; white-space: nowrap;">${item.today.toLocaleString()} ৳</td>
+                          <td class="num bold" style="padding: 3.5px 2px; white-space: nowrap;">${item.total.toLocaleString()} ৳</td>
+                        </tr>
+                      `).join('')}
+                      <tr style="background: #f8fafc;">
+                        <td class="bold" style="padding: 4px 2px;">Total Physical Cash</td>
+                        <td class="num bold" style="padding: 4px 2px; white-space: nowrap;">${summary.physicalCash.totalOpening.toLocaleString()} ৳</td>
+                        <td class="num bold" style="padding: 4px 2px; white-space: nowrap;">${summary.physicalCash.totalToday.toLocaleString()} ৳</td>
+                        <td class="num bold" style="padding: 4px 2px; white-space: nowrap; color: #4338ca;">${summary.physicalCash.total.toLocaleString()} ৳</td>
+                      </tr>
+                    </tbody>
+                  </table>
                 </div>
 
-                <div class="section" style="margin-bottom: 0;">
-                  <div class="section-title">
-                    <span>Monthly Cash Transfers</span>
+                <div class="section" style="margin-bottom: 0; padding: 8px 9px;">
+                  <div class="section-title" style="margin-bottom: 5px; padding-bottom: 4px;">
+                    <span>Monthly Cash Transfers Details</span>
                     <span>${summary.month}</span>
                   </div>
-                  <div class="row-item"><span>KHA Office to Nayan</span><span class="bold">${summary.transfers.khaToNayan.toLocaleString()} BDT</span></div>
-                  <div class="row-item"><span>Nayan to Dhaka office</span><span class="bold">${summary.transfers.nayanToDhaka.toLocaleString()} BDT</span></div>
-                  <div class="row-item"><span>Dhaka office to Nayan</span><span class="bold">${summary.transfers.dhakaToNayan.toLocaleString()} BDT</span></div>
-                  <div class="row-item"><span>Dhaka office to KHA Office</span><span class="bold">${summary.transfers.dhakaToKha.toLocaleString()} BDT</span></div>
-                  <div class="row-total"><span>Total Transfers</span><span>${summary.transfers.total.toLocaleString()} BDT</span></div>
+                  <table style="font-size: 8.5px;">
+                    <thead>
+                      <tr>
+                        <th style="padding: 3px 2px; font-size: 7px;">Description</th>
+                        <th class="num" style="padding: 3px 2px; font-size: 7px; white-space: nowrap;">Opening Balance</th>
+                        <th class="num" style="padding: 3px 2px; font-size: 7px; white-space: nowrap;">Month Amount</th>
+                        <th class="num" style="padding: 3px 2px; font-size: 7px; white-space: nowrap;">Total Amount</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      ${[
+                        { label: 'Khagrachari Office to Dhaka Office', open: summary.transfers.khaDhakaOpening, today: summary.transfers.khaDhakaToday, total: summary.transfers.khaToNayan },
+                        { label: 'Dhaka Office to Khagrachari Office', open: summary.transfers.dhakaKhaOpening, today: summary.transfers.dhakaKhaToday, total: summary.transfers.nayanToDhaka },
+                        { label: 'bKash Merchants to Khagrachari Account', open: summary.transfers.bkashAccountOpening, today: summary.transfers.bkashAccountToday, total: summary.transfers.dhakaToNayan },
+                        { label: 'Khagrachari Account to Dhaka Office', open: summary.transfers.accountDhakaOpening, today: summary.transfers.accountDhakaToday, total: summary.transfers.dhakaToKha },
+                      ].map((item) => `
+                        <tr>
+                          <td class="bold" style="padding: 3.5px 2px;">${item.label}</td>
+                          <td class="num" style="padding: 3.5px 2px; white-space: nowrap;">${item.open.toLocaleString()} ৳</td>
+                          <td class="num" style="padding: 3.5px 2px; white-space: nowrap;">${item.today.toLocaleString()} ৳</td>
+                          <td class="num bold" style="padding: 3.5px 2px; white-space: nowrap;">${item.total.toLocaleString()} ৳</td>
+                        </tr>
+                      `).join('')}
+                      <tr style="background: #f8fafc;">
+                        <td class="bold" style="padding: 4px 2px;">Total Transfers</td>
+                        <td class="num bold" style="padding: 4px 2px; white-space: nowrap;">${summary.transfers.totalOpening.toLocaleString()} ৳</td>
+                        <td class="num bold" style="padding: 4px 2px; white-space: nowrap;">${summary.transfers.totalToday.toLocaleString()} ৳</td>
+                        <td class="num bold" style="padding: 4px 2px; white-space: nowrap; color: #4338ca;">${summary.transfers.total.toLocaleString()} ৳</td>
+                      </tr>
+                    </tbody>
+                  </table>
                 </div>
               </div>
 
@@ -1283,7 +1528,7 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile, 
     setOpeningSsl(autoOpening.sslcommerz.toString());
   }, [selectedDate, closings, dailyClosingOnlyTransactions]);
 
-  // 2B. Load saved Cash Drawer inputs when selectedDate changes
+  // 2B. Load saved Cash Drawer inputs or auto carry-forward prior Total Amount into Opening Balance
   useEffect(() => {
     if (loading) return;
     const fetchDrawerForDate = async () => {
@@ -1292,36 +1537,74 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile, 
         const existingToday = closings.find((c) => c.date === selectedDate);
         const todayDocId = existingToday ? existingToday.id : `dc_${userId}_${selectedDate}`;
         const todayDocRef = doc(db, 'daily_closings', todayDocId);
-        const todayDocSnap = await getDocFromServer(todayDocRef);
 
-        if (todayDocSnap.exists()) {
-          const todayData = todayDocSnap.data() as DailyClosing;
-          if (lastDateRef.current !== selectedDate) {
-            setKhaOfficeCash((todayData.khaOfficeCash ?? 0).toString());
-            setDhakaOfficeCash((todayData.dhakaOfficeCash ?? 0).toString());
-            setNayanCash((todayData.nayanCash ?? 0).toString());
-            setAccountCash((todayData.accountCash ?? 0).toString());
+        let todayData: DailyClosing | null = null;
+        try {
+          const todayDocSnap = await getDoc(todayDocRef);
+          if (todayDocSnap.exists()) {
+            todayData = todayDocSnap.data() as DailyClosing;
+          }
+        } catch {
+          todayData = existingToday || null;
+        }
 
-            setTransferKhaToNayan((todayData.transferKhaToNayan ?? 0).toString());
-            setTransferNayanToDhaka((todayData.transferNayanToDhaka ?? 0).toString());
-            setTransferDhakaToNayan((todayData.transferDhakaToNayan ?? 0).toString());
-            setTransferDhakaToKha((todayData.transferDhakaToKha ?? 0).toString());
-            setIsDrawerSubmitted(!!todayData.isDrawerSubmitted);
+        const prior = getPriorDrawerTotals(selectedDate);
+        const isDateChanged = lastDateRef.current !== selectedDate;
+
+        // If today already has a submitted drawer statement or is locked/closed, load saved values
+        if (todayData && (todayData.isDrawerSubmitted || todayData.status === 'closed')) {
+          if (isDateChanged) {
+            setKhaOpening((todayData.khaOpeningCash ?? prior.khaOpening).toString());
+            setDhakaOpening((todayData.dhakaOpeningCash ?? prior.dhakaOpening).toString());
+            setNayanOpening((todayData.nayanOpeningCash ?? prior.nayanOpening).toString());
+            setAccountOpening((todayData.accountOpeningCash ?? prior.accountOpening).toString());
+
+            setKhaOfficeCash((todayData.khaTodayCash ?? todayData.khaOfficeCash ?? 0).toString());
+            setDhakaOfficeCash((todayData.dhakaTodayCash ?? todayData.dhakaOfficeCash ?? 0).toString());
+            setNayanCash((todayData.nayanTodayCash ?? todayData.nayanCash ?? 0).toString());
+            setAccountCash((todayData.accountTodayCash ?? todayData.accountCash ?? 0).toString());
+
+            setTransferKhaDhakaOpening((todayData.transferKhaDhakaOpening ?? prior.transfer1Opening).toString());
+            setTransferKhaDhakaToday((todayData.transferKhaDhakaToday ?? todayData.transferKhaToNayan ?? 0).toString());
+
+            setTransferDhakaKhaOpening((todayData.transferDhakaKhaOpening ?? prior.transfer2Opening).toString());
+            setTransferDhakaKhaToday((todayData.transferDhakaKhaToday ?? todayData.transferNayanToDhaka ?? 0).toString());
+
+            setTransferBkashAccountOpening((todayData.transferBkashAccountOpening ?? prior.transfer3Opening).toString());
+            setTransferBkashAccountToday((todayData.transferBkashAccountToday ?? todayData.transferDhakaToNayan ?? 0).toString());
+
+            setTransferAccountDhakaOpening((todayData.transferAccountDhakaOpening ?? prior.transfer4Opening).toString());
+            setTransferAccountDhakaToday((todayData.transferAccountDhakaToday ?? todayData.transferDhakaToKha ?? 0).toString());
+
+            setIsDrawerSubmitted(true);
           }
           lastDateRef.current = selectedDate;
           return;
         }
 
-        if (lastDateRef.current !== selectedDate) {
+        // Otherwise (unsubmitted draft, new date, or prior day just closed/updated):
+        // Automatically populate Opening Balance from the prior day's Total Amount!
+        setKhaOpening(prior.khaOpening.toString());
+        setDhakaOpening(prior.dhakaOpening.toString());
+        setNayanOpening(prior.nayanOpening.toString());
+        setAccountOpening(prior.accountOpening.toString());
+
+        setTransferKhaDhakaOpening(prior.transfer1Opening.toString());
+        setTransferDhakaKhaOpening(prior.transfer2Opening.toString());
+        setTransferBkashAccountOpening(prior.transfer3Opening.toString());
+        setTransferAccountDhakaOpening(prior.transfer4Opening.toString());
+
+        // When switching to a new date, Today Amount starts at 0 for fresh daily entry
+        if (isDateChanged) {
           setKhaOfficeCash('0');
           setDhakaOfficeCash('0');
           setNayanCash('0');
           setAccountCash('0');
 
-          setTransferKhaToNayan('0');
-          setTransferNayanToDhaka('0');
-          setTransferDhakaToNayan('0');
-          setTransferDhakaToKha('0');
+          setTransferKhaDhakaToday('0');
+          setTransferDhakaKhaToday('0');
+          setTransferBkashAccountToday('0');
+          setTransferAccountDhakaToday('0');
           setIsDrawerSubmitted(false);
         }
         lastDateRef.current = selectedDate;
@@ -1634,12 +1917,12 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile, 
 
             <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-8">
               <div class="p-4 rounded-xl border border-emerald-100 bg-emerald-50/20 text-left">
-                <span class="text-[11px] font-bold text-emerald-700 uppercase tracking-wider block">Total Daily Inflows (+)</span>
+                <span class="text-[11px] font-bold text-emerald-700 uppercase tracking-wider block">Total Daily Incomes (+)</span>
                 <h3 class="text-xl font-extrabold text-emerald-800 mt-1">৳ ${totalIncome.toLocaleString()}</h3>
               </div>
 
               <div class="p-4 rounded-xl border border-rose-100 bg-rose-50/20 text-left">
-                <span class="text-[11px] font-bold text-rose-700 uppercase tracking-wider block">Total Daily Outflows (-)</span>
+                <span class="text-[11px] font-bold text-rose-700 uppercase tracking-wider block">Total Daily Expenses (-)</span>
                 <h3 class="text-xl font-extrabold text-rose-800 mt-1">৳ ${totalExpense.toLocaleString()}</h3>
               </div>
 
@@ -1827,11 +2110,11 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile, 
 
             <div class="grid grid-cols-3 gap-4 mb-8">
               <div class="p-4 bg-emerald-50 border border-emerald-100 rounded-xl">
-                <span class="text-[10px] font-bold text-emerald-700 uppercase tracking-wider block">Total Inflow (+)</span>
+                <span class="text-[10px] font-bold text-emerald-700 uppercase tracking-wider block">Total Income (+)</span>
                 <span class="text-base font-black text-emerald-800 mt-1 block">BDT ${totalIncome.toLocaleString()}</span>
               </div>
               <div class="p-4 bg-rose-50 border border-rose-100 rounded-xl">
-                <span class="text-[10px] font-bold text-rose-700 uppercase tracking-wider block">Total Outflow (-)</span>
+                <span class="text-[10px] font-bold text-rose-700 uppercase tracking-wider block">Total Expense (-)</span>
                 <span class="text-base font-black text-rose-800 mt-1 block">BDT ${totalExpense.toLocaleString()}</span>
               </div>
               <div class="p-4 bg-indigo-50 border border-indigo-100 rounded-xl">
@@ -1845,8 +2128,8 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile, 
               <thead>
                 <tr class="bg-slate-50 border-b border-slate-200 text-slate-500 font-bold">
                   <th class="py-2.5 px-3">Payment Method</th>
-                  <th class="py-2.5 px-3 text-right">Inflow (+)</th>
-                  <th class="py-2.5 px-3 text-right">Outflow (-)</th>
+                  <th class="py-2.5 px-3 text-right">Income (+)</th>
+                  <th class="py-2.5 px-3 text-right">Expense (-)</th>
                 </tr>
               </thead>
               <tbody class="divide-y divide-slate-100">
@@ -2167,17 +2450,26 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile, 
     setError('');
     setSuccess('');
 
-    const kha = parseFloat(khaOfficeCash || '0');
-    const dhaka = parseFloat(dhakaOfficeCash || '0');
-    const nayan = parseFloat(nayanCash || '0');
-    const acc = parseFloat(accountCash || '0');
-    
-    const tKhaNayan = parseFloat(transferKhaToNayan || '0');
-    const tNayanDhaka = parseFloat(transferNayanToDhaka || '0');
-    const tDhakaNayan = parseFloat(transferDhakaToNayan || '0');
-    const tDhakaKha = parseFloat(transferDhakaToKha || '0');
+    const khaO = parseFloat(khaOpening || '0');
+    const dhakaO = parseFloat(dhakaOpening || '0');
+    const nayanO = parseFloat(nayanOpening || '0');
+    const accO = parseFloat(accountOpening || '0');
 
-    if (kha < 0 || dhaka < 0 || nayan < 0 || acc < 0 || tKhaNayan < 0 || tNayanDhaka < 0 || tDhakaNayan < 0 || tDhakaKha < 0) {
+    const khaT = parseFloat(khaOfficeCash || '0');
+    const dhakaT = parseFloat(dhakaOfficeCash || '0');
+    const nayanT = parseFloat(nayanCash || '0');
+    const accT = parseFloat(accountCash || '0');
+    
+    const t1O = parseFloat(transferKhaDhakaOpening || '0');
+    const t1T = parseFloat(transferKhaDhakaToday || '0');
+    const t2O = parseFloat(transferDhakaKhaOpening || '0');
+    const t2T = parseFloat(transferDhakaKhaToday || '0');
+    const t3O = parseFloat(transferBkashAccountOpening || '0');
+    const t3T = parseFloat(transferBkashAccountToday || '0');
+    const t4O = parseFloat(transferAccountDhakaOpening || '0');
+    const t4T = parseFloat(transferAccountDhakaToday || '0');
+
+    if (khaO < 0 || dhakaO < 0 || nayanO < 0 || accO < 0 || khaT < 0 || dhakaT < 0 || nayanT < 0 || accT < 0 || t1O < 0 || t1T < 0 || t2O < 0 || t2T < 0 || t3O < 0 || t3T < 0 || t4O < 0 || t4T < 0) {
       setError('Amounts cannot be negative.');
       return;
     }
@@ -2194,14 +2486,34 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile, 
         id: docId,
         userId,
         date: selectedDate,
-        khaOfficeCash: kha,
-        dhakaOfficeCash: dhaka,
-        nayanCash: nayan,
-        accountCash: acc,
-        transferKhaToNayan: tKhaNayan,
-        transferNayanToDhaka: tNayanDhaka,
-        transferDhakaToNayan: tDhakaNayan,
-        transferDhakaToKha: tDhakaKha,
+        khaOpeningCash: khaO,
+        khaTodayCash: khaT,
+        khaOfficeCash: khaO + khaT,
+        dhakaOpeningCash: dhakaO,
+        dhakaTodayCash: dhakaT,
+        dhakaOfficeCash: dhakaO + dhakaT,
+        nayanOpeningCash: nayanO,
+        nayanTodayCash: nayanT,
+        nayanCash: nayanO + nayanT,
+        accountOpeningCash: accO,
+        accountTodayCash: accT,
+        accountCash: accO + accT,
+        transferKhaDhakaOpening: t1O,
+        transferKhaDhakaToday: t1T,
+        transferKhaDhakaTotal: t1O + t1T,
+        transferKhaToNayan: t1O + t1T,
+        transferDhakaKhaOpening: t2O,
+        transferDhakaKhaToday: t2T,
+        transferDhakaKhaTotal: t2O + t2T,
+        transferNayanToDhaka: t2O + t2T,
+        transferBkashAccountOpening: t3O,
+        transferBkashAccountToday: t3T,
+        transferBkashAccountTotal: t3O + t3T,
+        transferDhakaToNayan: t3O + t3T,
+        transferAccountDhakaOpening: t4O,
+        transferAccountDhakaToday: t4T,
+        transferAccountDhakaTotal: t4O + t4T,
+        transferDhakaToKha: t4O + t4T,
         isDrawerSubmitted: true,
         status: docSnap.exists() ? (docSnap.data()?.status || 'open') : 'open',
         updatedAt: serverTimestamp()
@@ -2296,15 +2608,38 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile, 
         totalBankOut: bankFlow.expense,
         totalSslOut: sslFlow.expense,
 
-        khaOfficeCash: val(khaOfficeCash),
-        dhakaOfficeCash: val(dhakaOfficeCash),
-        nayanCash: val(nayanCash),
-        accountCash: val(accountCash),
+        khaOpeningCash: val(khaOpening),
+        khaTodayCash: val(khaOfficeCash),
+        khaOfficeCash: val(khaOpening) + val(khaOfficeCash),
+        dhakaOpeningCash: val(dhakaOpening),
+        dhakaTodayCash: val(dhakaOfficeCash),
+        dhakaOfficeCash: val(dhakaOpening) + val(dhakaOfficeCash),
+        nayanOpeningCash: val(nayanOpening),
+        nayanTodayCash: val(nayanCash),
+        nayanCash: val(nayanOpening) + val(nayanCash),
+        accountOpeningCash: val(accountOpening),
+        accountTodayCash: val(accountCash),
+        accountCash: val(accountOpening) + val(accountCash),
 
-        transferKhaToNayan: val(transferKhaToNayan),
-        transferNayanToDhaka: val(transferNayanToDhaka),
-        transferDhakaToNayan: val(transferDhakaToNayan),
-        transferDhakaToKha: val(transferDhakaToKha),
+        transferKhaDhakaOpening: val(transferKhaDhakaOpening),
+        transferKhaDhakaToday: val(transferKhaDhakaToday),
+        transferKhaDhakaTotal: val(transferKhaDhakaOpening) + val(transferKhaDhakaToday),
+        transferKhaToNayan: val(transferKhaDhakaOpening) + val(transferKhaDhakaToday),
+
+        transferDhakaKhaOpening: val(transferDhakaKhaOpening),
+        transferDhakaKhaToday: val(transferDhakaKhaToday),
+        transferDhakaKhaTotal: val(transferDhakaKhaOpening) + val(transferDhakaKhaToday),
+        transferNayanToDhaka: val(transferDhakaKhaOpening) + val(transferDhakaKhaToday),
+
+        transferBkashAccountOpening: val(transferBkashAccountOpening),
+        transferBkashAccountToday: val(transferBkashAccountToday),
+        transferBkashAccountTotal: val(transferBkashAccountOpening) + val(transferBkashAccountToday),
+        transferDhakaToNayan: val(transferBkashAccountOpening) + val(transferBkashAccountToday),
+
+        transferAccountDhakaOpening: val(transferAccountDhakaOpening),
+        transferAccountDhakaToday: val(transferAccountDhakaToday),
+        transferAccountDhakaTotal: val(transferAccountDhakaOpening) + val(transferAccountDhakaToday),
+        transferDhakaToKha: val(transferAccountDhakaOpening) + val(transferAccountDhakaToday),
 
         notes: notes.trim(),
         status: 'closed',
@@ -2380,15 +2715,34 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile, 
         totalBankOut: bankFlow.expense,
         totalSslOut: sslFlow.expense,
 
-        khaOfficeCash: val(khaOfficeCash),
-        dhakaOfficeCash: val(dhakaOfficeCash),
-        nayanCash: val(nayanCash),
-        accountCash: val(accountCash),
+        khaOpeningCash: val(khaOpening),
+        khaTodayCash: val(khaOfficeCash),
+        khaOfficeCash: val(khaOpening) + val(khaOfficeCash),
+        dhakaOpeningCash: val(dhakaOpening),
+        dhakaTodayCash: val(dhakaOfficeCash),
+        dhakaOfficeCash: val(dhakaOpening) + val(dhakaOfficeCash),
+        nayanOpeningCash: val(nayanOpening),
+        nayanTodayCash: val(nayanCash),
+        nayanCash: val(nayanOpening) + val(nayanCash),
+        accountOpeningCash: val(accountOpening),
+        accountTodayCash: val(accountCash),
+        accountCash: val(accountOpening) + val(accountCash),
 
-        transferKhaToNayan: val(transferKhaToNayan),
-        transferNayanToDhaka: val(transferNayanToDhaka),
-        transferDhakaToNayan: val(transferDhakaToNayan),
-        transferDhakaToKha: val(transferDhakaToKha),
+        transferKhaDhakaOpening: val(transferKhaDhakaOpening),
+        transferKhaDhakaToday: val(transferKhaDhakaToday),
+        transferKhaToNayan: val(transferKhaDhakaOpening) + val(transferKhaDhakaToday),
+
+        transferDhakaKhaOpening: val(transferDhakaKhaOpening),
+        transferDhakaKhaToday: val(transferDhakaKhaToday),
+        transferNayanToDhaka: val(transferDhakaKhaOpening) + val(transferDhakaKhaToday),
+
+        transferBkashAccountOpening: val(transferBkashAccountOpening),
+        transferBkashAccountToday: val(transferBkashAccountToday),
+        transferDhakaToNayan: val(transferBkashAccountOpening) + val(transferBkashAccountToday),
+
+        transferAccountDhakaOpening: val(transferAccountDhakaOpening),
+        transferAccountDhakaToday: val(transferAccountDhakaToday),
+        transferDhakaToKha: val(transferAccountDhakaOpening) + val(transferAccountDhakaToday),
 
         notes: notes.trim() || existing?.notes || '',
         status: existing?.status || 'open',
@@ -2489,99 +2843,93 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile, 
       doc.setTextColor(30, 41, 59);
       doc.text('Cash Drawer Statement (Physical Cash & Transfers)', 14, nextStartY);
 
-      const drawerRows = [
-        ['KHA Office Cash', `${(dc.khaOfficeCash ?? 0).toLocaleString()} BDT`, 'KHA Office to Nayan', `${(dc.transferKhaToNayan ?? 0).toLocaleString()} BDT`],
-        ['Dhaka Office', `${(dc.dhakaOfficeCash ?? 0).toLocaleString()} BDT`, 'Nayan to Dhaka office', `${(dc.transferNayanToDhaka ?? 0).toLocaleString()} BDT`],
-        ['Nayan Cash', `${(dc.nayanCash ?? 0).toLocaleString()} BDT`, 'Dhaka office to Nayan', `${(dc.transferDhakaToNayan ?? 0).toLocaleString()} BDT`],
-        ['Account Cash', `${(dc.accountCash ?? 0).toLocaleString()} BDT`, 'Dhaka to KHA Office', `${(dc.transferDhakaToKha ?? 0).toLocaleString()} BDT`],
+      const cashSummaryPdfRows = [
+        ['Khagrachari Office Cash', `${(dc.khaOpeningCash ?? 0).toLocaleString()} BDT`, `${(dc.khaTodayCash ?? (dc.khaOpeningCash === undefined ? dc.khaOfficeCash ?? 0 : 0)).toLocaleString()} BDT`, `${(dc.khaOfficeCash ?? 0).toLocaleString()} BDT`],
+        ['Dhaka Office Cash', `${(dc.dhakaOpeningCash ?? 0).toLocaleString()} BDT`, `${(dc.dhakaTodayCash ?? (dc.dhakaOpeningCash === undefined ? dc.dhakaOfficeCash ?? 0 : 0)).toLocaleString()} BDT`, `${(dc.dhakaOfficeCash ?? 0).toLocaleString()} BDT`],
+        ['bKash Merchants Cash', `${(dc.nayanOpeningCash ?? 0).toLocaleString()} BDT`, `${(dc.nayanTodayCash ?? (dc.nayanOpeningCash === undefined ? dc.nayanCash ?? 0 : 0)).toLocaleString()} BDT`, `${(dc.nayanCash ?? 0).toLocaleString()} BDT`],
+        ['Khagrachari Account Cash (P)', `${(dc.accountOpeningCash ?? 0).toLocaleString()} BDT`, `${(dc.accountTodayCash ?? (dc.accountOpeningCash === undefined ? dc.accountCash ?? 0 : 0)).toLocaleString()} BDT`, `${(dc.accountCash ?? 0).toLocaleString()} BDT`],
+        [
+          'Total Physical Cash',
+          `${((dc.khaOpeningCash ?? 0) + (dc.dhakaOpeningCash ?? 0) + (dc.nayanOpeningCash ?? 0) + (dc.accountOpeningCash ?? 0)).toLocaleString()} BDT`,
+          `${((dc.khaTodayCash ?? 0) + (dc.dhakaTodayCash ?? 0) + (dc.nayanTodayCash ?? 0) + (dc.accountTodayCash ?? 0)).toLocaleString()} BDT`,
+          `${((dc.khaOfficeCash ?? 0) + (dc.dhakaOfficeCash ?? 0) + (dc.nayanCash ?? 0) + (dc.accountCash ?? 0)).toLocaleString()} BDT`
+        ]
       ];
 
       autoTable(doc, {
         startY: nextStartY + 4,
-        head: [['Cash Summary', 'Amount', 'Money Transfers', 'Amount']],
-        body: drawerRows,
+        head: [['Cash Summary Details', 'Opening Balance', 'Today Amount', 'Total Amount']],
+        body: cashSummaryPdfRows,
         theme: 'striped',
         headStyles: {
           fillColor: [71, 85, 105], // Slate-600
           textColor: [255, 255, 255],
-          fontSize: 8.5,
+          fontSize: 8,
           fontStyle: 'bold',
         },
         bodyStyles: {
-          fontSize: 8,
+          fontSize: 7.5,
           textColor: [51, 65, 85],
         },
         columnStyles: {
-          1: { halign: 'right', fontStyle: 'bold' },
-          3: { halign: 'right', fontStyle: 'bold' },
+          0: { cellWidth: 70 },
+          1: { halign: 'right' },
+          2: { halign: 'right' },
+          3: { halign: 'right', fontStyle: 'bold', textColor: [67, 56, 202] },
         },
         styles: {
           font: 'helvetica',
-          cellPadding: 3,
+          cellPadding: 2.5,
+        },
+        margin: { left: 14, right: 14 }
+      });
+
+      nextStartY = (doc as any).lastAutoTable.finalY + 6;
+
+      const transferPdfRows = [
+        ['Khagrachari Office to Dhaka Office', `${(dc.transferKhaDhakaOpening ?? 0).toLocaleString()} BDT`, `${(dc.transferKhaDhakaToday ?? (dc.transferKhaDhakaOpening === undefined ? dc.transferKhaToNayan ?? 0 : 0)).toLocaleString()} BDT`, `${(dc.transferKhaToNayan ?? 0).toLocaleString()} BDT`],
+        ['Dhaka Office to Khagrachari Office', `${(dc.transferDhakaKhaOpening ?? 0).toLocaleString()} BDT`, `${(dc.transferDhakaKhaToday ?? (dc.transferDhakaKhaOpening === undefined ? dc.transferNayanToDhaka ?? 0 : 0)).toLocaleString()} BDT`, `${(dc.transferNayanToDhaka ?? 0).toLocaleString()} BDT`],
+        ['bKash Merchants to Khagrachari Account', `${(dc.transferBkashAccountOpening ?? 0).toLocaleString()} BDT`, `${(dc.transferBkashAccountToday ?? (dc.transferBkashAccountOpening === undefined ? dc.transferDhakaToNayan ?? 0 : 0)).toLocaleString()} BDT`, `${(dc.transferDhakaToNayan ?? 0).toLocaleString()} BDT`],
+        ['Khagrachari Account to Dhaka Office', `${(dc.transferAccountDhakaOpening ?? 0).toLocaleString()} BDT`, `${(dc.transferAccountDhakaToday ?? (dc.transferAccountDhakaOpening === undefined ? dc.transferDhakaToKha ?? 0 : 0)).toLocaleString()} BDT`, `${(dc.transferDhakaToKha ?? 0).toLocaleString()} BDT`],
+        [
+          'Total Transfers',
+          `${((dc.transferKhaDhakaOpening ?? 0) + (dc.transferDhakaKhaOpening ?? 0) + (dc.transferBkashAccountOpening ?? 0) + (dc.transferAccountDhakaOpening ?? 0)).toLocaleString()} BDT`,
+          `${((dc.transferKhaDhakaToday ?? 0) + (dc.transferDhakaKhaToday ?? 0) + (dc.transferBkashAccountToday ?? 0) + (dc.transferAccountDhakaToday ?? 0)).toLocaleString()} BDT`,
+          `${((dc.transferKhaToNayan ?? 0) + (dc.transferNayanToDhaka ?? 0) + (dc.transferDhakaToNayan ?? 0) + (dc.transferDhakaToKha ?? 0)).toLocaleString()} BDT`
+        ]
+      ];
+
+      autoTable(doc, {
+        startY: nextStartY,
+        head: [['Transfer Money Details', 'Opening Balance', 'Today Amount', 'Total Amount']],
+        body: transferPdfRows,
+        theme: 'striped',
+        headStyles: {
+          fillColor: [71, 85, 105], // Slate-600
+          textColor: [255, 255, 255],
+          fontSize: 8,
+          fontStyle: 'bold',
+        },
+        bodyStyles: {
+          fontSize: 7.5,
+          textColor: [51, 65, 85],
+        },
+        columnStyles: {
+          0: { cellWidth: 70 },
+          1: { halign: 'right' },
+          2: { halign: 'right' },
+          3: { halign: 'right', fontStyle: 'bold', textColor: [67, 56, 202] },
+        },
+        styles: {
+          font: 'helvetica',
+          cellPadding: 2.5,
         },
         margin: { left: 14, right: 14 }
       });
 
       nextStartY = (doc as any).lastAutoTable.finalY + 12;
 
-      // Filter and render Daily Closing Entry & Expense Logs
       const previewTxs = dailyClosingOnlyTransactions.filter(t => t.date === dc.date);
-      if (previewTxs.length > 0) {
-        if (nextStartY + 35 > 280) {
-          doc.addPage();
-          nextStartY = 20;
-        }
-
-        doc.setFont('helvetica', 'bold');
-        doc.setFontSize(10);
-        doc.setTextColor(30, 41, 59);
-        doc.text('Daily Closing Entry & Expense Logs', 14, nextStartY);
-
-        const txRows = previewTxs.map(t => [
-          getCategoryLabel(t),
-          t.paymentMethod || 'cash',
-          t.type === 'income' ? 'INFLOW (+)' : 'OUTFLOW (-)',
-          `${(t.amount ?? 0).toLocaleString()} BDT`
-        ]);
-
-        autoTable(doc, {
-          startY: nextStartY + 4,
-          head: [['Category', 'Payment Method', 'Type', 'Amount']],
-          body: txRows,
-          theme: 'striped',
-          headStyles: {
-            fillColor: [71, 85, 105], // slate-600
-            textColor: [255, 255, 255],
-            fontSize: 8.5,
-            fontStyle: 'bold',
-          },
-          bodyStyles: {
-            fontSize: 8,
-            textColor: [51, 65, 85],
-          },
-          columnStyles: {
-            2: { halign: 'center', fontStyle: 'bold' },
-            3: { halign: 'right', fontStyle: 'bold' },
-          },
-          didParseCell: (data) => {
-            if (data.section === 'body' && data.column.index === 2) {
-              const val = data.cell.raw as string;
-              if (val.includes('INFLOW')) {
-                data.cell.styles.textColor = [5, 150, 105];
-              } else {
-                data.cell.styles.textColor = [225, 29, 72];
-              }
-            }
-          },
-          styles: {
-            font: 'helvetica',
-            cellPadding: 3,
-          },
-          margin: { left: 14, right: 14 }
-        });
-
-        nextStartY = (doc as any).lastAutoTable.finalY + 12;
-      }
 
       // Financial Summary Box
       const totalIn = (dc.totalCashIn ?? 0) + (dc.totalBkashIn ?? 0) + (dc.totalNagadIn ?? 0) + (dc.totalRocketIn ?? 0) + (dc.totalBankIn ?? 0) + (dc.totalSslIn ?? 0);
@@ -2605,11 +2953,11 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile, 
       doc.text(`${totalOpenBal.toLocaleString()} BDT`, 192, nextStartY + 6, { align: 'right' });
 
       doc.setTextColor(5, 150, 105); // emerald-600
-      doc.text('(+) TOTAL COLLECTION (INFLOW):', 18, nextStartY + 13);
+      doc.text('(+) TOTAL COLLECTION (INCOME):', 18, nextStartY + 13);
       doc.text(`+ ${totalIn.toLocaleString()} BDT`, 192, nextStartY + 13, { align: 'right' });
 
       doc.setTextColor(225, 29, 72); // rose-600
-      doc.text('(-) TOTAL EXPENSE (OUTFLOW):', 18, nextStartY + 20);
+      doc.text('(-) TOTAL EXPENSE (EXPENSE):', 18, nextStartY + 20);
       doc.text(`- ${totalOut.toLocaleString()} BDT`, 192, nextStartY + 20, { align: 'right' });
 
       doc.setDrawColor(226, 232, 240);
@@ -2723,6 +3071,65 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile, 
         const splitNotes = doc.splitTextToSize(dc.notes, 182);
         doc.text(splitNotes, 14, nextStartY + 4);
         nextStartY += 5 + (splitNotes.length * 3.5);
+      }
+
+      // Daily Closing Entry & Expense Logs (at bottom)
+      if (previewTxs.length > 0) {
+        nextStartY += 4;
+        if (nextStartY + 35 > 280) {
+          doc.addPage();
+          nextStartY = 20;
+        }
+
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(10);
+        doc.setTextColor(30, 41, 59);
+        doc.text('Daily Closing Entry & Expense Logs', 14, nextStartY);
+
+        const txRows = previewTxs.map(t => [
+          getCategoryLabel(t),
+          t.paymentMethod || 'cash',
+          t.type === 'income' ? 'INCOME (+)' : 'EXPENSE (-)',
+          `${(t.amount ?? 0).toLocaleString()} BDT`
+        ]);
+
+        autoTable(doc, {
+          startY: nextStartY + 4,
+          head: [['Category', 'Payment Method', 'Type', 'Amount']],
+          body: txRows,
+          theme: 'striped',
+          headStyles: {
+            fillColor: [71, 85, 105], // slate-600
+            textColor: [255, 255, 255],
+            fontSize: 8.5,
+            fontStyle: 'bold',
+          },
+          bodyStyles: {
+            fontSize: 8,
+            textColor: [51, 65, 85],
+          },
+          columnStyles: {
+            2: { halign: 'center', fontStyle: 'bold' },
+            3: { halign: 'right', fontStyle: 'bold' },
+          },
+          didParseCell: (data) => {
+            if (data.section === 'body' && data.column.index === 2) {
+              const val = data.cell.raw as string;
+              if (val.includes('INCOME')) {
+                data.cell.styles.textColor = [5, 150, 105];
+              } else {
+                data.cell.styles.textColor = [225, 29, 72];
+              }
+            }
+          },
+          styles: {
+            font: 'helvetica',
+            cellPadding: 3,
+          },
+          margin: { left: 14, right: 14 }
+        });
+
+        nextStartY = (doc as any).lastAutoTable.finalY + 12;
       }
 
       // Signatures
@@ -2913,8 +3320,8 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile, 
                     <tr>
                       <th>Method</th>
                       <th class="num">Opening</th>
-                      <th class="num">Inflow (+)</th>
-                      <th class="num">Outflow (-)</th>
+                      <th class="num">Income (+)</th>
+                      <th class="num">Expense (-)</th>
                       <th class="num">Closing</th>
                       <th class="num">P/L</th>
                     </tr>
@@ -2947,60 +3354,86 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile, 
                 </table>
               </div>
 
-              <div class="grid-2">
-                <div class="section" style="margin-bottom: 0;">
-                  <div class="section-title"><span>Cash Summary Details</span><span>BDT</span></div>
-                  <div class="row-item"><span>KHA Office Cash</span><span class="bold">${(dc.khaOfficeCash ?? 0).toLocaleString()} ৳</span></div>
-                  <div class="row-item"><span>Dhaka office</span><span class="bold">${(dc.dhakaOfficeCash ?? 0).toLocaleString()} ৳</span></div>
-                  <div class="row-item"><span>Nayan Cash</span><span class="bold">${(dc.nayanCash ?? 0).toLocaleString()} ৳</span></div>
-                  <div class="row-item" style="border-bottom: none;"><span>Account Cash</span><span class="bold">${(dc.accountCash ?? 0).toLocaleString()} ৳</span></div>
+              <div class="section">
+                <div class="section-title">
+                  <span>Cash Summary Details</span>
+                  <span>BDT</span>
                 </div>
-                <div class="section" style="margin-bottom: 0;">
-                  <div class="section-title"><span>Transfer Money Details</span><span>BDT</span></div>
-                  <div class="row-item"><span>KHA Office to Nayan</span><span class="bold">${(dc.transferKhaToNayan ?? 0).toLocaleString()} ৳</span></div>
-                  <div class="row-item"><span>Nayan to Dhaka office</span><span class="bold">${(dc.transferNayanToDhaka ?? 0).toLocaleString()} ৳</span></div>
-                  <div class="row-item"><span>Dhaka office to Nayan</span><span class="bold">${(dc.transferDhakaToNayan ?? 0).toLocaleString()} ৳</span></div>
-                  <div class="row-item" style="border-bottom: none;"><span>Dhaka to KHA Office</span><span class="bold">${(dc.transferDhakaToKha ?? 0).toLocaleString()} ৳</span></div>
-                </div>
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Description</th>
+                      <th class="num">Opening Balance</th>
+                      <th class="num">Today Amount</th>
+                      <th class="num">Total Amount</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    ${[
+                      { label: 'Khagrachari Office Cash', open: dc.khaOpeningCash, today: dc.khaTodayCash, total: dc.khaOfficeCash ?? 0 },
+                      { label: 'Dhaka Office Cash', open: dc.dhakaOpeningCash, today: dc.dhakaTodayCash, total: dc.dhakaOfficeCash ?? 0 },
+                      { label: 'bKash Merchants Cash', open: dc.nayanOpeningCash, today: dc.nayanTodayCash, total: dc.nayanCash ?? 0 },
+                      { label: 'Khagrachari Account Cash (P)', open: dc.accountOpeningCash, today: dc.accountTodayCash, total: dc.accountCash ?? 0 },
+                    ].map((item) => `
+                      <tr>
+                        <td class="bold">${item.label}</td>
+                        <td class="num">${(item.open ?? 0).toLocaleString()} ৳</td>
+                        <td class="num">${(item.today ?? (item.open === undefined ? item.total : 0)).toLocaleString()} ৳</td>
+                        <td class="num bold">${item.total.toLocaleString()} ৳</td>
+                      </tr>
+                    `).join('')}
+                    <tr style="background: #f8fafc;">
+                      <td class="bold">Total Physical Cash</td>
+                      <td class="num bold">${((dc.khaOpeningCash ?? 0) + (dc.dhakaOpeningCash ?? 0) + (dc.nayanOpeningCash ?? 0) + (dc.accountOpeningCash ?? 0)).toLocaleString()} ৳</td>
+                      <td class="num bold">${((dc.khaTodayCash ?? 0) + (dc.dhakaTodayCash ?? 0) + (dc.nayanTodayCash ?? 0) + (dc.accountTodayCash ?? 0)).toLocaleString()} ৳</td>
+                      <td class="num bold" style="color: #4338ca;">${((dc.khaOfficeCash ?? 0) + (dc.dhakaOfficeCash ?? 0) + (dc.nayanCash ?? 0) + (dc.accountCash ?? 0)).toLocaleString()} ৳</td>
+                    </tr>
+                  </tbody>
+                </table>
               </div>
 
               <div class="section">
                 <div class="section-title">
-                  <span>Daily Closing Entry &amp; Expense Logs</span>
-                  <span>${previewTxs.length} Entries</span>
+                  <span>Transfer Money Details</span>
+                  <span>BDT</span>
                 </div>
-                ${previewTxs.length === 0 ? `
-                  <div style="text-align: center; padding: 10px; color: #94a3b8; font-style: italic; font-size: 10px;">
-                    No entry statements or expense logs recorded for this day.
-                  </div>
-                ` : `
-                  <table>
-                    <thead>
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Description</th>
+                      <th class="num">Opening Balance</th>
+                      <th class="num">Today Amount</th>
+                      <th class="num">Total Amount</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    ${[
+                      { label: 'Khagrachari Office to Dhaka Office', open: dc.transferKhaDhakaOpening, today: dc.transferKhaDhakaToday, total: dc.transferKhaToNayan ?? 0 },
+                      { label: 'Dhaka Office to Khagrachari Office', open: dc.transferDhakaKhaOpening, today: dc.transferDhakaKhaToday, total: dc.transferNayanToDhaka ?? 0 },
+                      { label: 'bKash Merchants to Khagrachari Account', open: dc.transferBkashAccountOpening, today: dc.transferBkashAccountToday, total: dc.transferDhakaToNayan ?? 0 },
+                      { label: 'Khagrachari Account to Dhaka Office', open: dc.transferAccountDhakaOpening, today: dc.transferAccountDhakaToday, total: dc.transferDhakaToKha ?? 0 },
+                    ].map((item) => `
                       <tr>
-                        <th>Category</th>
-                        <th>Method</th>
-                        <th style="text-align: right;">Type</th>
-                        <th class="num">Amount</th>
+                        <td class="bold">${item.label}</td>
+                        <td class="num">${(item.open ?? 0).toLocaleString()} ৳</td>
+                        <td class="num">${(item.today ?? (item.open === undefined ? item.total : 0)).toLocaleString()} ৳</td>
+                        <td class="num bold">${item.total.toLocaleString()} ৳</td>
                       </tr>
-                    </thead>
-                    <tbody>
-                      ${previewTxs.map((tx) => `
-                        <tr>
-                          <td class="bold">${escapeHtml(getCategoryLabel(tx))}</td>
-                          <td style="text-transform: capitalize;">${escapeHtml(tx.paymentMethod || 'cash')}</td>
-                          <td style="text-align: right;" class="${tx.type === 'income' ? 'inc' : 'exp'}">${tx.type === 'income' ? 'INFLOW' : 'OUTFLOW'}</td>
-                          <td class="num ${tx.type === 'income' ? 'inc' : 'exp'}">${tx.type === 'income' ? '+' : '-'}${(tx.amount ?? 0).toLocaleString()} BDT</td>
-                        </tr>
-                      `).join('')}
-                    </tbody>
-                  </table>
-                `}
+                    `).join('')}
+                    <tr style="background: #f8fafc;">
+                      <td class="bold">Total Transfers</td>
+                      <td class="num bold">${((dc.transferKhaDhakaOpening ?? 0) + (dc.transferDhakaKhaOpening ?? 0) + (dc.transferBkashAccountOpening ?? 0) + (dc.transferAccountDhakaOpening ?? 0)).toLocaleString()} ৳</td>
+                      <td class="num bold">${((dc.transferKhaDhakaToday ?? 0) + (dc.transferDhakaKhaToday ?? 0) + (dc.transferBkashAccountToday ?? 0) + (dc.transferAccountDhakaToday ?? 0)).toLocaleString()} ৳</td>
+                      <td class="num bold" style="color: #4338ca;">${((dc.transferKhaToNayan ?? 0) + (dc.transferNayanToDhaka ?? 0) + (dc.transferDhakaToNayan ?? 0) + (dc.transferDhakaToKha ?? 0)).toLocaleString()} ৳</td>
+                    </tr>
+                  </tbody>
+                </table>
               </div>
 
               <div class="summary-box">
                 <div class="summary-row"><span>TOTAL OPENING BALANCE:</span><span class="num">${totalOpenBal.toLocaleString()} BDT</span></div>
-                <div class="summary-row inc"><span>(+) TOTAL COLLECTION (INFLOW):</span><span class="num">+ ${totalIn.toLocaleString()} BDT</span></div>
-                <div class="summary-row exp"><span>(-) TOTAL EXPENSE (OUTFLOW):</span><span class="num">- ${totalOut.toLocaleString()} BDT</span></div>
+                <div class="summary-row inc"><span>(+) TOTAL COLLECTION (INCOME):</span><span class="num">+ ${totalIn.toLocaleString()} BDT</span></div>
+                <div class="summary-row exp"><span>(-) TOTAL EXPENSE (EXPENSE):</span><span class="num">- ${totalOut.toLocaleString()} BDT</span></div>
                 <div class="summary-grand"><span>(=) GRAND CLOSING BALANCE:</span><span class="num">${totalCloseBal.toLocaleString()} BDT</span></div>
               </div>
 
@@ -3035,6 +3468,39 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile, 
               </div>
 
               ${dc.notes ? `<div class="notes-box"><strong>Notes / Comments:</strong> ${escapeHtml(dc.notes)}</div>` : ''}
+
+              <div class="section">
+                <div class="section-title">
+                  <span>Daily Closing Entry &amp; Expense Logs</span>
+                  <span>${previewTxs.length} Entries</span>
+                </div>
+                ${previewTxs.length === 0 ? `
+                  <div style="text-align: center; padding: 10px; color: #94a3b8; font-style: italic; font-size: 10px;">
+                    No entry statements or expense logs recorded for this day.
+                  </div>
+                ` : `
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>Category</th>
+                        <th>Method</th>
+                        <th style="text-align: right;">Type</th>
+                        <th class="num">Amount</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      ${previewTxs.map((tx) => `
+                        <tr>
+                          <td class="bold">${escapeHtml(getCategoryLabel(tx))}</td>
+                          <td style="text-transform: capitalize;">${escapeHtml(tx.paymentMethod || 'cash')}</td>
+                          <td style="text-align: right;" class="${tx.type === 'income' ? 'inc' : 'exp'}">${tx.type === 'income' ? 'INCOME' : 'EXPENSE'}</td>
+                          <td class="num ${tx.type === 'income' ? 'inc' : 'exp'}">${tx.type === 'income' ? '+' : '-'}${(tx.amount ?? 0).toLocaleString()} BDT</td>
+                        </tr>
+                      `).join('')}
+                    </tbody>
+                  </table>
+                `}
+              </div>
 
               <div class="sigs">
                 <div class="sig-box"><div class="sig-line">Prepared By</div></div>
@@ -3106,20 +3572,36 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile, 
         ['Report Date', dc.date, 'Status', (dc.status || 'open').toUpperCase(), 'Generated By', dc.closedBy || 'System Admin'],
         [],
         ['DETAILED BREAKDOWN BY PAYMENT METHOD'],
-        ['Payment Method', 'Opening Balance (BDT)', 'Inflow (+) (BDT)', 'Outflow (-) (BDT)', 'Closing Balance (BDT)', 'P/L (BDT)'],
+        ['Payment Method', 'Opening Balance (BDT)', 'Income (+) (BDT)', 'Expense (-) (BDT)', 'Closing Balance (BDT)', 'P/L (BDT)'],
         ...methodRows.map((m) => [m.name, m.open, m.inc, m.exp, m.close, m.inc - m.exp]),
         ['TOTAL', totalOpenBal, totalIn, totalOut, totalCloseBal, totalIn - totalOut],
         [],
-        ['CASH DRAWER STATEMENT', 'AMOUNT (BDT)', '', 'TRANSFER MONEY DETAILS', 'AMOUNT (BDT)'],
-        ['KHA Office Cash', dc.khaOfficeCash ?? 0, '', 'KHA Office to Nayan', dc.transferKhaToNayan ?? 0],
-        ['Dhaka office', dc.dhakaOfficeCash ?? 0, '', 'Nayan to Dhaka office', dc.transferNayanToDhaka ?? 0],
-        ['Nayan Cash', dc.nayanCash ?? 0, '', 'Dhaka office to Nayan', dc.transferDhakaToNayan ?? 0],
-        ['Account Cash', dc.accountCash ?? 0, '', 'Dhaka to KHA Office', dc.transferDhakaToKha ?? 0],
+        ['CASH SUMMARY DETAILS', 'OPENING BALANCE (BDT)', 'TODAY AMOUNT (BDT)', 'TOTAL AMOUNT (BDT)'],
+        ['Khagrachari Office Cash', dc.khaOpeningCash ?? 0, dc.khaTodayCash ?? (dc.khaOpeningCash === undefined ? dc.khaOfficeCash ?? 0 : 0), dc.khaOfficeCash ?? 0],
+        ['Dhaka Office Cash', dc.dhakaOpeningCash ?? 0, dc.dhakaTodayCash ?? (dc.dhakaOpeningCash === undefined ? dc.dhakaOfficeCash ?? 0 : 0), dc.dhakaOfficeCash ?? 0],
+        ['bKash Merchants Cash', dc.nayanOpeningCash ?? 0, dc.nayanTodayCash ?? (dc.nayanOpeningCash === undefined ? dc.nayanCash ?? 0 : 0), dc.nayanCash ?? 0],
+        ['Khagrachari Account Cash (P)', dc.accountOpeningCash ?? 0, dc.accountTodayCash ?? (dc.accountOpeningCash === undefined ? dc.accountCash ?? 0 : 0), dc.accountCash ?? 0],
+        ['TOTAL PHYSICAL CASH', 
+          (dc.khaOpeningCash ?? 0) + (dc.dhakaOpeningCash ?? 0) + (dc.nayanOpeningCash ?? 0) + (dc.accountOpeningCash ?? 0),
+          (dc.khaTodayCash ?? 0) + (dc.dhakaTodayCash ?? 0) + (dc.nayanTodayCash ?? 0) + (dc.accountTodayCash ?? 0),
+          (dc.khaOfficeCash ?? 0) + (dc.dhakaOfficeCash ?? 0) + (dc.nayanCash ?? 0) + (dc.accountCash ?? 0)
+        ],
+        [],
+        ['TRANSFER MONEY DETAILS', 'OPENING BALANCE (BDT)', 'TODAY AMOUNT (BDT)', 'TOTAL AMOUNT (BDT)'],
+        ['Khagrachari Office to Dhaka Office', dc.transferKhaDhakaOpening ?? 0, dc.transferKhaDhakaToday ?? (dc.transferKhaDhakaOpening === undefined ? dc.transferKhaToNayan ?? 0 : 0), dc.transferKhaToNayan ?? 0],
+        ['Dhaka Office to Khagrachari Office', dc.transferDhakaKhaOpening ?? 0, dc.transferDhakaKhaToday ?? (dc.transferDhakaKhaOpening === undefined ? dc.transferNayanToDhaka ?? 0 : 0), dc.transferNayanToDhaka ?? 0],
+        ['bKash Merchants to Khagrachari Account', dc.transferBkashAccountOpening ?? 0, dc.transferBkashAccountToday ?? (dc.transferBkashAccountOpening === undefined ? dc.transferDhakaToNayan ?? 0 : 0), dc.transferDhakaToNayan ?? 0],
+        ['Khagrachari Account to Dhaka Office', dc.transferAccountDhakaOpening ?? 0, dc.transferAccountDhakaToday ?? (dc.transferAccountDhakaOpening === undefined ? dc.transferDhakaToKha ?? 0 : 0), dc.transferDhakaToKha ?? 0],
+        ['TOTAL TRANSFERS',
+          (dc.transferKhaDhakaOpening ?? 0) + (dc.transferDhakaKhaOpening ?? 0) + (dc.transferBkashAccountOpening ?? 0) + (dc.transferAccountDhakaOpening ?? 0),
+          (dc.transferKhaDhakaToday ?? 0) + (dc.transferDhakaKhaToday ?? 0) + (dc.transferBkashAccountToday ?? 0) + (dc.transferAccountDhakaToday ?? 0),
+          (dc.transferKhaToNayan ?? 0) + (dc.transferNayanToDhaka ?? 0) + (dc.transferDhakaToNayan ?? 0) + (dc.transferDhakaToKha ?? 0)
+        ],
         [],
         ['FINANCIAL SUMMARY', 'AMOUNT (BDT)'],
         ['Total Opening Balance', totalOpenBal],
-        ['(+) Total Collection (Inflow)', totalIn],
-        ['(-) Total Expense (Outflow)', totalOut],
+        ['(+) Total Collection (Income)', totalIn],
+        ['(-) Total Expense (Expense)', totalOut],
         ['(=) Grand Closing Balance', totalCloseBal],
       ];
 
@@ -3149,7 +3631,7 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile, 
           tx.date,
           getCategoryLabel(tx),
           (tx.paymentMethod || 'cash').toUpperCase(),
-          tx.type === 'income' ? 'INFLOW' : 'OUTFLOW',
+          tx.type === 'income' ? 'INCOME' : 'EXPENSE',
           tx.amount ?? 0,
           tx.notes || '',
         ]),
@@ -3260,8 +3742,8 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile, 
                     <tr className="border-b border-slate-200 pb-1 text-slate-500 font-bold">
                       <th className="py-1">METHOD</th>
                       <th className="py-1 text-right">OPENING</th>
-                      <th className="py-1 text-right">INFLOW (+)</th>
-                      <th className="py-1 text-right">OUTFLOW (-)</th>
+                      <th className="py-1 text-right">INCOME (+)</th>
+                      <th className="py-1 text-right">EXPENSE (-)</th>
                       <th className="py-1 text-right">CLOSING</th>
                       <th className="py-1 text-right">P/L</th>
                     </tr>
@@ -3297,122 +3779,100 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile, 
               <div className="font-bold text-[9px] uppercase text-slate-400 tracking-wider mb-2 mt-5">
                 Cash Drawer Statement (Physical Cash & Transfers)
               </div>
-              <div className="border-t border-b border-slate-200 py-2 mb-4 grid grid-cols-2 gap-4">
+              <div className="space-y-3 mb-4">
                 {/* Cash Summary Details */}
-                <div>
-                  <div className="font-bold text-[9px] text-slate-500 uppercase tracking-wider mb-1.5 border-b border-slate-100 pb-0.5">
-                    CASH SUMMARY DETAILS
+                <div className="border border-slate-200 rounded-lg p-2.5 bg-slate-50/40">
+                  <div className="font-bold text-[9px] text-slate-700 uppercase tracking-wider mb-2 pb-1 border-b border-slate-200 flex justify-between">
+                    <span>CASH SUMMARY DETAILS</span>
+                    <span className="text-slate-400">BDT</span>
                   </div>
                   <table className="w-full text-[10px] text-left">
-                    <tbody>
-                      <tr className="border-b border-slate-100">
-                        <td className="py-1 text-slate-600">KHA Office Cash</td>
-                        <td className="py-1 text-right font-mono font-bold text-slate-900">
-                          {(printPreviewData.khaOfficeCash ?? 0).toLocaleString()} ৳
-                        </td>
+                    <thead>
+                      <tr className="border-b border-slate-200 text-[9px] font-bold text-slate-500 uppercase">
+                        <th className="py-1 px-1">Description</th>
+                        <th className="py-1 px-1 text-right">Opening Balance</th>
+                        <th className="py-1 px-1 text-right">Today Amount</th>
+                        <th className="py-1 px-1 text-right">Total Amount</th>
                       </tr>
-                      <tr className="border-b border-slate-100">
-                        <td className="py-1 text-slate-600">Dhaka office</td>
-                        <td className="py-1 text-right font-mono font-bold text-slate-900">
-                          {(printPreviewData.dhakaOfficeCash ?? 0).toLocaleString()} ৳
-                        </td>
-                      </tr>
-                      <tr className="border-b border-slate-100">
-                        <td className="py-1 text-slate-600">Nayan Cash</td>
-                        <td className="py-1 text-right font-mono font-bold text-slate-900">
-                          {(printPreviewData.nayanCash ?? 0).toLocaleString()} ৳
-                        </td>
-                      </tr>
-                      <tr className="border-b border-slate-100">
-                        <td className="py-1 text-slate-600">Account Cash</td>
-                        <td className="py-1 text-right font-mono font-bold text-slate-900">
-                          {(printPreviewData.accountCash ?? 0).toLocaleString()} ৳
-                        </td>
-                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {[
+                        { label: 'Khagrachari Office Cash', open: printPreviewData.khaOpeningCash, today: printPreviewData.khaTodayCash, total: printPreviewData.khaOfficeCash ?? 0 },
+                        { label: 'Dhaka Office Cash', open: printPreviewData.dhakaOpeningCash, today: printPreviewData.dhakaTodayCash, total: printPreviewData.dhakaOfficeCash ?? 0 },
+                        { label: 'bKash Merchants Cash', open: printPreviewData.nayanOpeningCash, today: printPreviewData.nayanTodayCash, total: printPreviewData.nayanCash ?? 0 },
+                        { label: 'Khagrachari Account Cash (P)', open: printPreviewData.accountOpeningCash, today: printPreviewData.accountTodayCash, total: printPreviewData.accountCash ?? 0 },
+                      ].map((item, idx) => (
+                        <tr key={idx}>
+                          <td className="py-1 px-1 font-medium text-slate-700">{item.label}</td>
+                          <td className="py-1 px-1 text-right font-mono text-slate-600">{(item.open ?? 0).toLocaleString()} ৳</td>
+                          <td className="py-1 px-1 text-right font-mono text-slate-600">{(item.today ?? (item.open === undefined ? item.total : 0)).toLocaleString()} ৳</td>
+                          <td className="py-1 px-1 text-right font-mono font-bold text-slate-900">{item.total.toLocaleString()} ৳</td>
+                        </tr>
+                      ))}
                     </tbody>
+                    <tfoot>
+                      <tr className="border-t border-slate-200 font-bold text-[10px] bg-slate-100/60">
+                        <td className="py-1.5 px-1 text-slate-900">Total Physical Cash</td>
+                        <td className="py-1.5 px-1 text-right font-mono text-slate-700">
+                          {(((printPreviewData.khaOpeningCash ?? 0) + (printPreviewData.dhakaOpeningCash ?? 0) + (printPreviewData.nayanOpeningCash ?? 0) + (printPreviewData.accountOpeningCash ?? 0))).toLocaleString()} ৳
+                        </td>
+                        <td className="py-1.5 px-1 text-right font-mono text-slate-700">
+                          {(((printPreviewData.khaTodayCash ?? 0) + (printPreviewData.dhakaTodayCash ?? 0) + (printPreviewData.nayanTodayCash ?? 0) + (printPreviewData.accountTodayCash ?? 0))).toLocaleString()} ৳
+                        </td>
+                        <td className="py-1.5 px-1 text-right font-mono text-indigo-700 font-extrabold">
+                          {(((printPreviewData.khaOfficeCash ?? 0) + (printPreviewData.dhakaOfficeCash ?? 0) + (printPreviewData.nayanCash ?? 0) + (printPreviewData.accountCash ?? 0))).toLocaleString()} ৳
+                        </td>
+                      </tr>
+                    </tfoot>
                   </table>
                 </div>
 
                 {/* Transfer Money Details */}
-                <div>
-                  <div className="font-bold text-[9px] text-slate-500 uppercase tracking-wider mb-1.5 border-b border-slate-100 pb-0.5">
-                    TRANSFER MONEY DETAILS
+                <div className="border border-slate-200 rounded-lg p-2.5 bg-slate-50/40">
+                  <div className="font-bold text-[9px] text-slate-700 uppercase tracking-wider mb-2 pb-1 border-b border-slate-200 flex justify-between">
+                    <span>TRANSFER MONEY DETAILS</span>
+                    <span className="text-slate-400">BDT</span>
                   </div>
                   <table className="w-full text-[10px] text-left">
-                    <tbody>
-                      <tr className="border-b border-slate-100">
-                        <td className="py-1 text-slate-600">KHA Office to Nayan</td>
-                        <td className="py-1 text-right font-mono font-bold text-slate-900">
-                          {(printPreviewData.transferKhaToNayan ?? 0).toLocaleString()} ৳
-                        </td>
+                    <thead>
+                      <tr className="border-b border-slate-200 text-[9px] font-bold text-slate-500 uppercase">
+                        <th className="py-1 px-1">Description</th>
+                        <th className="py-1 px-1 text-right">Opening Balance</th>
+                        <th className="py-1 px-1 text-right">Today Amount</th>
+                        <th className="py-1 px-1 text-right">Total Amount</th>
                       </tr>
-                      <tr className="border-b border-slate-100">
-                        <td className="py-1 text-slate-600">Nayan to Dhaka office</td>
-                        <td className="py-1 text-right font-mono font-bold text-slate-900">
-                          {(printPreviewData.transferNayanToDhaka ?? 0).toLocaleString()} ৳
-                        </td>
-                      </tr>
-                      <tr className="border-b border-slate-100">
-                        <td className="py-1 text-slate-600">Dhaka office to Nayan</td>
-                        <td className="py-1 text-right font-mono font-bold text-slate-900">
-                          {(printPreviewData.transferDhakaToNayan ?? 0).toLocaleString()} ৳
-                        </td>
-                      </tr>
-                      <tr className="border-b border-slate-100">
-                        <td className="py-1 text-slate-600">Dhaka to KHA Office</td>
-                        <td className="py-1 text-right font-mono font-bold text-slate-900">
-                          {(printPreviewData.transferDhakaToKha ?? 0).toLocaleString()} ৳
-                        </td>
-                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {[
+                        { label: 'Khagrachari Office to Dhaka Office', open: printPreviewData.transferKhaDhakaOpening, today: printPreviewData.transferKhaDhakaToday, total: printPreviewData.transferKhaToNayan ?? 0 },
+                        { label: 'Dhaka Office to Khagrachari Office', open: printPreviewData.transferDhakaKhaOpening, today: printPreviewData.transferDhakaKhaToday, total: printPreviewData.transferNayanToDhaka ?? 0 },
+                        { label: 'bKash Merchants to Khagrachari Account', open: printPreviewData.transferBkashAccountOpening, today: printPreviewData.transferBkashAccountToday, total: printPreviewData.transferDhakaToNayan ?? 0 },
+                        { label: 'Khagrachari Account to Dhaka Office', open: printPreviewData.transferAccountDhakaOpening, today: printPreviewData.transferAccountDhakaToday, total: printPreviewData.transferDhakaToKha ?? 0 },
+                      ].map((item, idx) => (
+                        <tr key={idx}>
+                          <td className="py-1 px-1 font-medium text-slate-700">{item.label}</td>
+                          <td className="py-1 px-1 text-right font-mono text-slate-600">{(item.open ?? 0).toLocaleString()} ৳</td>
+                          <td className="py-1 px-1 text-right font-mono text-slate-600">{(item.today ?? (item.open === undefined ? item.total : 0)).toLocaleString()} ৳</td>
+                          <td className="py-1 px-1 text-right font-mono font-bold text-slate-900">{item.total.toLocaleString()} ৳</td>
+                        </tr>
+                      ))}
                     </tbody>
+                    <tfoot>
+                      <tr className="border-t border-slate-200 font-bold text-[10px] bg-slate-100/60">
+                        <td className="py-1.5 px-1 text-slate-900">Total Transfers</td>
+                        <td className="py-1.5 px-1 text-right font-mono text-slate-700">
+                          {(((printPreviewData.transferKhaDhakaOpening ?? 0) + (printPreviewData.transferDhakaKhaOpening ?? 0) + (printPreviewData.transferBkashAccountOpening ?? 0) + (printPreviewData.transferAccountDhakaOpening ?? 0))).toLocaleString()} ৳
+                        </td>
+                        <td className="py-1.5 px-1 text-right font-mono text-slate-700">
+                          {(((printPreviewData.transferKhaDhakaToday ?? 0) + (printPreviewData.transferDhakaKhaToday ?? 0) + (printPreviewData.transferBkashAccountToday ?? 0) + (printPreviewData.transferAccountDhakaToday ?? 0))).toLocaleString()} ৳
+                        </td>
+                        <td className="py-1.5 px-1 text-right font-mono text-indigo-700 font-extrabold">
+                          {(((printPreviewData.transferKhaToNayan ?? 0) + (printPreviewData.transferNayanToDhaka ?? 0) + (printPreviewData.transferDhakaToNayan ?? 0) + (printPreviewData.transferDhakaToKha ?? 0))).toLocaleString()} ৳
+                        </td>
+                      </tr>
+                    </tfoot>
                   </table>
                 </div>
-              </div>
-
-              {/* Daily Closing Transaction Logs */}
-              <div className="font-bold text-[9px] uppercase text-slate-400 tracking-wider mb-2 mt-5">
-                Daily Closing Entry & Expense Logs
-              </div>
-              <div className="border-t border-b border-slate-200 py-1 mb-5 overflow-x-auto">
-                {(() => {
-                  const previewTxs = dailyClosingOnlyTransactions.filter(t => t.date === printPreviewData.date);
-                  if (previewTxs.length === 0) {
-                    return (
-                      <div className="py-2 text-center text-slate-400 italic text-[10px]">
-                        No entry statements or expense logs recorded for this day.
-                      </div>
-                    );
-                  }
-                  return (
-                    <table className="w-full text-[10px] text-left">
-                      <thead>
-                        <tr className="border-b border-slate-200 pb-1 text-slate-500 font-bold">
-                          <th className="py-1">CATEGORY</th>
-                          <th className="py-1">METHOD</th>
-                          <th className="py-1 text-right">TYPE</th>
-                          <th className="py-1 text-right">AMOUNT</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {previewTxs.map((tx, idx) => {
-                          const categoryLabel = getCategoryLabel(tx);
-                          return (
-                            <tr key={tx.id || idx} className="border-b border-slate-100">
-                              <td className="py-1.5 font-semibold text-slate-700">{categoryLabel}</td>
-                              <td className="py-1.5 text-slate-600 capitalize">{tx.paymentMethod || 'cash'}</td>
-                              <td className={`py-1.5 text-right font-bold ${tx.type === 'income' ? 'text-emerald-600' : 'text-rose-600'}`}>
-                                {tx.type === 'income' ? 'INFLOW' : 'OUTFLOW'}
-                              </td>
-                              <td className={`py-1.5 text-right font-mono font-bold ${tx.type === 'income' ? 'text-emerald-700' : 'text-rose-700'}`}>
-                                {tx.type === 'income' ? '+' : '-'}{(tx.amount ?? 0).toLocaleString()} BDT
-                              </td>
-                            </tr>
-                          );
-                        })}
-                      </tbody>
-                    </table>
-                  );
-                })()}
               </div>
 
               {/* Financial Summary */}
@@ -3422,11 +3882,11 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile, 
                   <span>{totalOpenBal.toLocaleString()} BDT</span>
                 </div>
                 <div className="flex justify-between font-bold text-emerald-700">
-                  <span>(+) TOTAL COLLECTION (INFLOW):</span>
+                  <span>(+) TOTAL COLLECTION (INCOME):</span>
                   <span>+ {totalIn.toLocaleString()} BDT</span>
                 </div>
                 <div className="flex justify-between font-bold text-rose-700">
-                  <span>(-) TOTAL EXPENSE (OUTFLOW):</span>
+                  <span>(-) TOTAL EXPENSE (EXPENSE):</span>
                   <span>- {totalOut.toLocaleString()} BDT</span>
                 </div>
                 <div className="flex justify-between font-extrabold border-t border-slate-300 pt-1.5 text-xs text-slate-900">
@@ -3486,6 +3946,53 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile, 
                   <strong>Notes / Comments:</strong> {printPreviewData.notes}
                 </div>
               )}
+
+              {/* Daily Closing Transaction Logs (at bottom) */}
+              <div className="font-bold text-[9px] uppercase text-slate-400 tracking-wider mb-2 mt-5 flex items-center justify-between">
+                <span>Daily Closing Entry & Expense Logs</span>
+                <span>{dailyClosingOnlyTransactions.filter(t => t.date === printPreviewData.date).length} Entries</span>
+              </div>
+              <div className="border-t border-b border-slate-200 py-1 mb-5 overflow-x-auto">
+                {(() => {
+                  const previewTxs = dailyClosingOnlyTransactions.filter(t => t.date === printPreviewData.date);
+                  if (previewTxs.length === 0) {
+                    return (
+                      <div className="py-2 text-center text-slate-400 italic text-[10px]">
+                        No entry statements or expense logs recorded for this day.
+                      </div>
+                    );
+                  }
+                  return (
+                    <table className="w-full text-[10px] text-left">
+                      <thead>
+                        <tr className="border-b border-slate-200 pb-1 text-slate-500 font-bold">
+                          <th className="py-1">CATEGORY</th>
+                          <th className="py-1">METHOD</th>
+                          <th className="py-1 text-right">TYPE</th>
+                          <th className="py-1 text-right">AMOUNT</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {previewTxs.map((tx, idx) => {
+                          const categoryLabel = getCategoryLabel(tx);
+                          return (
+                            <tr key={tx.id || idx} className="border-b border-slate-100">
+                              <td className="py-1.5 font-semibold text-slate-700">{categoryLabel}</td>
+                              <td className="py-1.5 text-slate-600 capitalize">{tx.paymentMethod || 'cash'}</td>
+                              <td className={`py-1.5 text-right font-bold ${tx.type === 'income' ? 'text-emerald-600' : 'text-rose-600'}`}>
+                                {tx.type === 'income' ? 'INCOME' : 'EXPENSE'}
+                              </td>
+                              <td className={`py-1.5 text-right font-mono font-bold ${tx.type === 'income' ? 'text-emerald-700' : 'text-rose-700'}`}>
+                                {tx.type === 'income' ? '+' : '-'}{(tx.amount ?? 0).toLocaleString()} BDT
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  );
+                })()}
+              </div>
 
               {/* Signature Blocks */}
               <div className="mt-8 flex justify-between text-[10px] text-slate-500">
@@ -3771,66 +4278,116 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile, 
                 </div>
               </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
-                <div>
-                  <h5 className="text-[10px] font-extrabold text-slate-400 uppercase tracking-widest mb-2.5 pb-1 border-b border-slate-100 flex items-center justify-between">
-                    <span>Physical Cash Summary</span>
-                    <span>Amount (৳)</span>
-                  </h5>
-                  <div className="space-y-1.5 text-xs">
-                    <div className="flex justify-between py-1 border-b border-dashed border-slate-200">
-                      <span className="text-slate-500 font-medium">KHA Office Cash</span>
-                      <span className="font-mono font-bold text-slate-800">{val(khaOfficeCash).toLocaleString()} ৳</span>
-                    </div>
-                    <div className="flex justify-between py-1 border-b border-dashed border-slate-200">
-                      <span className="text-slate-500 font-medium">Dhaka Office Cash</span>
-                      <span className="font-mono font-bold text-slate-800">{val(dhakaOfficeCash).toLocaleString()} ৳</span>
-                    </div>
-                    <div className="flex justify-between py-1 border-b border-dashed border-slate-200">
-                      <span className="text-slate-500 font-medium">Nayan Cash</span>
-                      <span className="font-mono font-bold text-slate-800">{val(nayanCash).toLocaleString()} ৳</span>
-                    </div>
-                    <div className="flex justify-between py-1 border-b border-dashed border-slate-200">
-                      <span className="text-slate-500 font-medium">Account Cash</span>
-                      <span className="font-mono font-bold text-slate-800">{val(accountCash).toLocaleString()} ৳</span>
-                    </div>
-                    <div className="flex justify-between pt-2 text-indigo-700 font-bold">
-                      <span>Total Physical Cash</span>
-                      <span className="font-mono text-sm font-black">
-                        {(val(khaOfficeCash) + val(dhakaOfficeCash) + val(nayanCash) + val(accountCash)).toLocaleString()} ৳
-                      </span>
-                    </div>
+              <div className="space-y-4">
+                {/* Physical Cash Summary Table */}
+                <div className="border border-slate-200/80 rounded-xl p-3 bg-slate-50/40">
+                  <div className="flex items-center justify-between border-b border-slate-200 pb-2 mb-2">
+                    <h5 className="text-[10px] font-black text-slate-700 uppercase tracking-wider">
+                      Physical Cash Summary
+                    </h5>
+                    <span className="text-[10px] font-bold text-slate-400">BDT</span>
+                  </div>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left border-collapse text-xs">
+                      <thead>
+                        <tr className="border-b border-slate-200 text-[10px] font-bold text-slate-500 uppercase tracking-wider">
+                          <th className="py-1.5 px-2">Description</th>
+                          <th className="py-1.5 px-2 text-right">Opening Balance</th>
+                          <th className="py-1.5 px-2 text-right">Today Amount</th>
+                          <th className="py-1.5 px-2 text-right">Total Amount</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {[
+                          { label: 'Khagrachari Office Cash', open: val(khaOpening), today: val(khaOfficeCash), total: val(khaOpening) + val(khaOfficeCash) },
+                          { label: 'Dhaka Office Cash', open: val(dhakaOpening), today: val(dhakaOfficeCash), total: val(dhakaOpening) + val(dhakaOfficeCash) },
+                          { label: 'bKash Merchants Cash', open: val(nayanOpening), today: val(nayanCash), total: val(nayanOpening) + val(nayanCash) },
+                          { label: 'Khagrachari Account Cash (P)', open: val(accountOpening), today: val(accountCash), total: val(accountOpening) + val(accountCash) },
+                        ].map((row, idx) => (
+                          <tr key={idx} className="hover:bg-slate-100/50">
+                            <td className="py-1.5 px-2 font-semibold text-slate-700 whitespace-nowrap">{row.label}</td>
+                            <td className="py-1.5 px-2 text-right font-mono text-slate-600 whitespace-nowrap">{row.open.toLocaleString()} ৳</td>
+                            <td className="py-1.5 px-2 text-right font-mono text-slate-600 whitespace-nowrap">{row.today.toLocaleString()} ৳</td>
+                            <td className="py-1.5 px-2 text-right font-mono font-bold text-slate-800 whitespace-nowrap">{row.total.toLocaleString()} ৳</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                      <tfoot>
+                        <tr className="border-t border-slate-200 font-bold text-xs bg-slate-100/70">
+                          <td className="py-2 px-2 text-slate-800">Total Physical Cash</td>
+                          <td className="py-2 px-2 text-right font-mono text-slate-700 whitespace-nowrap">
+                            {(val(khaOpening) + val(dhakaOpening) + val(nayanOpening) + val(accountOpening)).toLocaleString()} ৳
+                          </td>
+                          <td className="py-2 px-2 text-right font-mono text-slate-700 whitespace-nowrap">
+                            {(val(khaOfficeCash) + val(dhakaOfficeCash) + val(nayanCash) + val(accountCash)).toLocaleString()} ৳
+                          </td>
+                          <td className="py-2 px-2 text-right font-mono text-indigo-700 font-extrabold whitespace-nowrap">
+                            {(
+                              val(khaOpening) + val(khaOfficeCash) +
+                              val(dhakaOpening) + val(dhakaOfficeCash) +
+                              val(nayanOpening) + val(nayanCash) +
+                              val(accountOpening) + val(accountCash)
+                            ).toLocaleString()} ৳
+                          </td>
+                        </tr>
+                      </tfoot>
+                    </table>
                   </div>
                 </div>
 
-                <div>
-                  <h5 className="text-[10px] font-extrabold text-slate-400 uppercase tracking-widest mb-2.5 pb-1 border-b border-slate-100 flex items-center justify-between">
-                    <span>Money Transfers</span>
-                    <span>Amount (৳)</span>
-                  </h5>
-                  <div className="space-y-1.5 text-xs">
-                    <div className="flex justify-between py-1 border-b border-dashed border-slate-200">
-                      <span className="text-slate-500 font-medium">KHA Office to Nayan</span>
-                      <span className="font-mono font-bold text-slate-800">{val(transferKhaToNayan).toLocaleString()} ৳</span>
-                    </div>
-                    <div className="flex justify-between py-1 border-b border-dashed border-slate-200">
-                      <span className="text-slate-500 font-medium">Nayan to Dhaka office</span>
-                      <span className="font-mono font-bold text-slate-800">{val(transferNayanToDhaka).toLocaleString()} ৳</span>
-                    </div>
-                    <div className="flex justify-between py-1 border-b border-dashed border-slate-200">
-                      <span className="text-slate-500 font-medium">Dhaka office to Nayan</span>
-                      <span className="font-mono font-bold text-slate-800">{val(transferDhakaToNayan).toLocaleString()} ৳</span>
-                    </div>
-                    <div className="flex justify-between py-1 border-b border-dashed border-slate-200">
-                      <span className="text-slate-500 font-medium">Dhaka office to KHA Office</span>
-                      <span className="font-mono font-bold text-slate-800">{val(transferDhakaToKha).toLocaleString()} ৳</span>
-                    </div>
-                    <div className="flex justify-between pt-2 text-slate-700 font-bold">
-                      <span>Total Transfers</span>
-                      <span className="font-mono text-sm font-black">
-                        {(val(transferKhaToNayan) + val(transferNayanToDhaka) + val(transferDhakaToNayan) + val(transferDhakaToKha)).toLocaleString()} ৳
-                      </span>
-                    </div>
+                {/* Money Transfers Table */}
+                <div className="border border-slate-200/80 rounded-xl p-3 bg-slate-50/40">
+                  <div className="flex items-center justify-between border-b border-slate-200 pb-2 mb-2">
+                    <h5 className="text-[10px] font-black text-slate-700 uppercase tracking-wider">
+                      Money Transfers
+                    </h5>
+                    <span className="text-[10px] font-bold text-slate-400">BDT</span>
+                  </div>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left border-collapse text-xs">
+                      <thead>
+                        <tr className="border-b border-slate-200 text-[10px] font-bold text-slate-500 uppercase tracking-wider">
+                          <th className="py-1.5 px-2">Description</th>
+                          <th className="py-1.5 px-2 text-right">Opening Balance</th>
+                          <th className="py-1.5 px-2 text-right">Today Amount</th>
+                          <th className="py-1.5 px-2 text-right">Total Amount</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {[
+                          { label: 'Khagrachari Office to Dhaka Office', open: val(transferKhaDhakaOpening), today: val(transferKhaDhakaToday), total: val(transferKhaDhakaOpening) + val(transferKhaDhakaToday) },
+                          { label: 'Dhaka Office to Khagrachari Office', open: val(transferDhakaKhaOpening), today: val(transferDhakaKhaToday), total: val(transferDhakaKhaOpening) + val(transferDhakaKhaToday) },
+                          { label: 'bKash Merchants to Khagrachari Account', open: val(transferBkashAccountOpening), today: val(transferBkashAccountToday), total: val(transferBkashAccountOpening) + val(transferBkashAccountToday) },
+                          { label: 'Khagrachari Account to Dhaka Office', open: val(transferAccountDhakaOpening), today: val(transferAccountDhakaToday), total: val(transferAccountDhakaOpening) + val(transferAccountDhakaToday) },
+                        ].map((row, idx) => (
+                          <tr key={idx} className="hover:bg-slate-100/50">
+                            <td className="py-1.5 px-2 font-semibold text-slate-700 whitespace-nowrap">{row.label}</td>
+                            <td className="py-1.5 px-2 text-right font-mono text-slate-600 whitespace-nowrap">{row.open.toLocaleString()} ৳</td>
+                            <td className="py-1.5 px-2 text-right font-mono text-slate-600 whitespace-nowrap">{row.today.toLocaleString()} ৳</td>
+                            <td className="py-1.5 px-2 text-right font-mono font-bold text-slate-800 whitespace-nowrap">{row.total.toLocaleString()} ৳</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                      <tfoot>
+                        <tr className="border-t border-slate-200 font-bold text-xs bg-slate-100/70">
+                          <td className="py-2 px-2 text-slate-800">Total Transfers</td>
+                          <td className="py-2 px-2 text-right font-mono text-slate-700 whitespace-nowrap">
+                            {(val(transferKhaDhakaOpening) + val(transferDhakaKhaOpening) + val(transferBkashAccountOpening) + val(transferAccountDhakaOpening)).toLocaleString()} ৳
+                          </td>
+                          <td className="py-2 px-2 text-right font-mono text-slate-700 whitespace-nowrap">
+                            {(val(transferKhaDhakaToday) + val(transferDhakaKhaToday) + val(transferBkashAccountToday) + val(transferAccountDhakaToday)).toLocaleString()} ৳
+                          </td>
+                          <td className="py-2 px-2 text-right font-mono text-indigo-700 font-extrabold whitespace-nowrap">
+                            {(
+                              val(transferKhaDhakaOpening) + val(transferKhaDhakaToday) +
+                              val(transferDhakaKhaOpening) + val(transferDhakaKhaToday) +
+                              val(transferBkashAccountOpening) + val(transferBkashAccountToday) +
+                              val(transferAccountDhakaOpening) + val(transferAccountDhakaToday)
+                            ).toLocaleString()} ৳
+                          </td>
+                        </tr>
+                      </tfoot>
+                    </table>
                   </div>
                 </div>
               </div>
@@ -3860,7 +4417,7 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile, 
             <div className="p-3.5 bg-emerald-50/50 rounded-xl flex items-center justify-between">
               <div className="flex items-center gap-2">
                 <TrendingUp className="w-3.5 h-3.5 text-emerald-600" />
-                <span className="text-[11px] font-semibold text-emerald-600">Total Collection (Inflow):</span>
+                <span className="text-[11px] font-semibold text-emerald-600">Total Collection (Income):</span>
               </div>
               <span className="text-xs font-extrabold text-emerald-600">+{totalInflow.toLocaleString()} BDT</span>
             </div>
@@ -3868,7 +4425,7 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile, 
             <div className="p-3.5 bg-rose-50/50 rounded-xl flex items-center justify-between">
               <div className="flex items-center gap-2">
                 <TrendingDown className="w-3.5 h-3.5 text-rose-600" />
-                <span className="text-[11px] font-semibold text-rose-600">Total Expense (Outflow):</span>
+                <span className="text-[11px] font-semibold text-rose-600">Total Expense (Expense):</span>
               </div>
               <span className="text-xs font-extrabold text-rose-600">-{totalOutflow.toLocaleString()} BDT</span>
             </div>
@@ -4341,7 +4898,7 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile, 
               <div className="grid grid-cols-5 text-[10px] font-bold text-slate-400 uppercase tracking-wider border-b border-slate-100 pb-2">
                 <div className="col-span-2">Payment Method</div>
                 <div className="text-right">Opening Balance</div>
-                <div className="text-right">Inflow (+In)</div>
+                <div className="text-right">Income (+In)</div>
                 <div className="text-right">Closing Balance</div>
               </div>
 
@@ -4418,11 +4975,11 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile, 
                   <span>{((selectedClosing.openingCash ?? 0) + (selectedClosing.openingBkash ?? 0) + (selectedClosing.openingNagad ?? 0) + (selectedClosing.openingRocket ?? 0) + (selectedClosing.openingBank ?? 0) + (selectedClosing.openingSsl ?? 0)).toLocaleString()} BDT</span>
                 </div>
                 <div className="flex justify-between text-emerald-600">
-                  <span>(+) Total Collection (Inflow):</span>
+                  <span>(+) Total Collection (Income):</span>
                   <span>+{((selectedClosing.totalCashIn ?? 0) + (selectedClosing.totalBkashIn ?? 0) + (selectedClosing.totalNagadIn ?? 0) + (selectedClosing.totalRocketIn ?? 0) + (selectedClosing.totalBankIn ?? 0) + (selectedClosing.totalSslIn ?? 0)).toLocaleString()} BDT</span>
                 </div>
                 <div className="flex justify-between text-rose-600">
-                  <span>(-) Total Expense (Outflow):</span>
+                  <span>(-) Total Expense (Expense):</span>
                   <span>-{((selectedClosing.totalCashOut ?? 0) + (selectedClosing.totalBkashOut ?? 0) + (selectedClosing.totalNagadOut ?? 0) + (selectedClosing.totalRocketOut ?? 0) + (selectedClosing.totalBankOut ?? 0) + (selectedClosing.totalSslOut ?? 0)).toLocaleString()} BDT</span>
                 </div>
                 <div className="flex justify-between border-t border-indigo-100 pt-2 text-indigo-900 font-extrabold text-sm">
@@ -4437,50 +4994,96 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile, 
                   <Coins className="w-3.5 h-3.5 text-indigo-500" />
                   <span>Cash Drawer Statement</span>
                 </h4>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div className="space-y-4">
                   {/* Cash Summary Details */}
                   <div className="bg-white border border-slate-100 rounded-xl p-3">
-                    <h5 className="text-[10px] font-black text-slate-400 uppercase tracking-wider mb-2">Cash Summary</h5>
-                    <div className="space-y-1.5 text-xs">
-                      <div className="flex justify-between">
-                        <span className="text-slate-500 font-medium">KHA Office Cash:</span>
-                        <span className="font-bold font-mono text-slate-700">{(selectedClosing.khaOfficeCash ?? 0).toLocaleString()} ৳</span>
-                      </div>
-                      <div className="flex justify-between">
-                        <span className="text-slate-500 font-medium">Dhaka office:</span>
-                        <span className="font-bold font-mono text-slate-700">{(selectedClosing.dhakaOfficeCash ?? 0).toLocaleString()} ৳</span>
-                      </div>
-                      <div className="flex justify-between">
-                        <span className="text-slate-500 font-medium">Nayan Cash:</span>
-                        <span className="font-bold font-mono text-slate-700">{(selectedClosing.nayanCash ?? 0).toLocaleString()} ৳</span>
-                      </div>
-                      <div className="flex justify-between">
-                        <span className="text-slate-500 font-medium">Account Cash:</span>
-                        <span className="font-bold font-mono text-slate-700">{(selectedClosing.accountCash ?? 0).toLocaleString()} ৳</span>
-                      </div>
+                    <h5 className="text-[10px] font-black text-slate-400 uppercase tracking-wider mb-2">Cash Summary Details</h5>
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-xs text-left">
+                        <thead>
+                          <tr className="border-b border-slate-100 text-[10px] font-bold text-slate-400 uppercase">
+                            <th className="py-1.5 px-2">Description</th>
+                            <th className="py-1.5 px-2 text-right">Opening Balance</th>
+                            <th className="py-1.5 px-2 text-right">Today Amount</th>
+                            <th className="py-1.5 px-2 text-right">Total Amount</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-50">
+                          {[
+                            { label: 'Khagrachari Office Cash', open: selectedClosing?.khaOpeningCash, today: selectedClosing?.khaTodayCash, total: selectedClosing?.khaOfficeCash ?? 0 },
+                            { label: 'Dhaka Office Cash', open: selectedClosing?.dhakaOpeningCash, today: selectedClosing?.dhakaTodayCash, total: selectedClosing?.dhakaOfficeCash ?? 0 },
+                            { label: 'bKash Merchants Cash', open: selectedClosing?.nayanOpeningCash, today: selectedClosing?.nayanTodayCash, total: selectedClosing?.nayanCash ?? 0 },
+                            { label: 'Khagrachari Account Cash (P)', open: selectedClosing?.accountOpeningCash, today: selectedClosing?.accountTodayCash, total: selectedClosing?.accountCash ?? 0 },
+                          ].map((item, idx) => (
+                            <tr key={idx} className="hover:bg-slate-50/50">
+                              <td className="py-1.5 px-2 font-medium text-slate-700">{item.label}</td>
+                              <td className="py-1.5 px-2 text-right font-mono text-slate-600">{(item.open ?? 0).toLocaleString()} ৳</td>
+                              <td className="py-1.5 px-2 text-right font-mono text-slate-600">{(item.today ?? (item.open === undefined ? item.total : 0)).toLocaleString()} ৳</td>
+                              <td className="py-1.5 px-2 text-right font-mono font-bold text-slate-800">{item.total.toLocaleString()} ৳</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                        <tfoot>
+                          <tr className="border-t border-slate-200 font-bold text-xs bg-slate-50/70">
+                            <td className="py-1.5 px-2 text-slate-800">Total Physical Cash</td>
+                            <td className="py-1.5 px-2 text-right font-mono text-slate-700">
+                              {(((selectedClosing?.khaOpeningCash ?? 0) + (selectedClosing?.dhakaOpeningCash ?? 0) + (selectedClosing?.nayanOpeningCash ?? 0) + (selectedClosing?.accountOpeningCash ?? 0))).toLocaleString()} ৳
+                            </td>
+                            <td className="py-1.5 px-2 text-right font-mono text-slate-700">
+                              {(((selectedClosing?.khaTodayCash ?? 0) + (selectedClosing?.dhakaTodayCash ?? 0) + (selectedClosing?.nayanTodayCash ?? 0) + (selectedClosing?.accountTodayCash ?? 0))).toLocaleString()} ৳
+                            </td>
+                            <td className="py-1.5 px-2 text-right font-mono text-indigo-700">
+                              {(((selectedClosing?.khaOfficeCash ?? 0) + (selectedClosing?.dhakaOfficeCash ?? 0) + (selectedClosing?.nayanCash ?? 0) + (selectedClosing?.accountCash ?? 0))).toLocaleString()} ৳
+                            </td>
+                          </tr>
+                        </tfoot>
+                      </table>
                     </div>
                   </div>
 
                   {/* Transfer Money Details */}
                   <div className="bg-white border border-slate-100 rounded-xl p-3">
-                    <h5 className="text-[10px] font-black text-slate-400 uppercase tracking-wider mb-2">Transfer Money</h5>
-                    <div className="space-y-1.5 text-xs">
-                      <div className="flex justify-between">
-                        <span className="text-slate-500 font-medium">KHA Office to Nayan:</span>
-                        <span className="font-bold font-mono text-slate-700">{(selectedClosing.transferKhaToNayan ?? 0).toLocaleString()} ৳</span>
-                      </div>
-                      <div className="flex justify-between">
-                        <span className="text-slate-500 font-medium">Nayan to Dhaka office:</span>
-                        <span className="font-bold font-mono text-slate-700">{(selectedClosing.transferNayanToDhaka ?? 0).toLocaleString()} ৳</span>
-                      </div>
-                      <div className="flex justify-between">
-                        <span className="text-slate-500 font-medium">Dhaka office to Nayan:</span>
-                        <span className="font-bold font-mono text-slate-700">{(selectedClosing.transferDhakaToNayan ?? 0).toLocaleString()} ৳</span>
-                      </div>
-                      <div className="flex justify-between">
-                        <span className="text-slate-500 font-medium">Dhaka office to KHA Office:</span>
-                        <span className="font-bold font-mono text-slate-700">{(selectedClosing.transferDhakaToKha ?? 0).toLocaleString()} ৳</span>
-                      </div>
+                    <h5 className="text-[10px] font-black text-slate-400 uppercase tracking-wider mb-2">Transfer Money Details</h5>
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-xs text-left">
+                        <thead>
+                          <tr className="border-b border-slate-100 text-[10px] font-bold text-slate-400 uppercase">
+                            <th className="py-1.5 px-2">Description</th>
+                            <th className="py-1.5 px-2 text-right">Opening Balance</th>
+                            <th className="py-1.5 px-2 text-right">Today Amount</th>
+                            <th className="py-1.5 px-2 text-right">Total Amount</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-50">
+                          {[
+                            { label: 'Khagrachari Office to Dhaka Office', open: selectedClosing?.transferKhaDhakaOpening, today: selectedClosing?.transferKhaDhakaToday, total: selectedClosing?.transferKhaToNayan ?? 0 },
+                            { label: 'Dhaka Office to Khagrachari Office', open: selectedClosing?.transferDhakaKhaOpening, today: selectedClosing?.transferDhakaKhaToday, total: selectedClosing?.transferNayanToDhaka ?? 0 },
+                            { label: 'bKash Merchants to Khagrachari Account', open: selectedClosing?.transferBkashAccountOpening, today: selectedClosing?.transferBkashAccountToday, total: selectedClosing?.transferDhakaToNayan ?? 0 },
+                            { label: 'Khagrachari Account to Dhaka Office', open: selectedClosing?.transferAccountDhakaOpening, today: selectedClosing?.transferAccountDhakaToday, total: selectedClosing?.transferDhakaToKha ?? 0 },
+                          ].map((item, idx) => (
+                            <tr key={idx} className="hover:bg-slate-50/50">
+                              <td className="py-1.5 px-2 font-medium text-slate-700">{item.label}</td>
+                              <td className="py-1.5 px-2 text-right font-mono text-slate-600">{(item.open ?? 0).toLocaleString()} ৳</td>
+                              <td className="py-1.5 px-2 text-right font-mono text-slate-600">{(item.today ?? (item.open === undefined ? item.total : 0)).toLocaleString()} ৳</td>
+                              <td className="py-1.5 px-2 text-right font-mono font-bold text-slate-800">{item.total.toLocaleString()} ৳</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                        <tfoot>
+                          <tr className="border-t border-slate-200 font-bold text-xs bg-slate-50/70">
+                            <td className="py-1.5 px-2 text-slate-800">Total Transfers</td>
+                            <td className="py-1.5 px-2 text-right font-mono text-slate-700">
+                              {(((selectedClosing?.transferKhaDhakaOpening ?? 0) + (selectedClosing?.transferDhakaKhaOpening ?? 0) + (selectedClosing?.transferBkashAccountOpening ?? 0) + (selectedClosing?.transferAccountDhakaOpening ?? 0))).toLocaleString()} ৳
+                            </td>
+                            <td className="py-1.5 px-2 text-right font-mono text-slate-700">
+                              {(((selectedClosing?.transferKhaDhakaToday ?? 0) + (selectedClosing?.transferDhakaKhaToday ?? 0) + (selectedClosing?.transferBkashAccountToday ?? 0) + (selectedClosing?.transferAccountDhakaToday ?? 0))).toLocaleString()} ৳
+                            </td>
+                            <td className="py-1.5 px-2 text-right font-mono text-indigo-700">
+                              {(((selectedClosing?.transferKhaToNayan ?? 0) + (selectedClosing?.transferNayanToDhaka ?? 0) + (selectedClosing?.transferDhakaToNayan ?? 0) + (selectedClosing?.transferDhakaToKha ?? 0))).toLocaleString()} ৳
+                            </td>
+                          </tr>
+                        </tfoot>
+                      </table>
                     </div>
                   </div>
                 </div>
@@ -4991,77 +5594,169 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile, 
 
             <form onSubmit={handleDrawerSubmit} className="space-y-5">
               <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
-                {/* Cash Summary Details */}
-                <div className="border border-slate-200/60 rounded-2xl p-4 bg-slate-50/50">
+                {/* Cash Summary Details Table */}
+                <div className="col-span-full border border-slate-200/60 rounded-2xl p-4 bg-slate-50/50">
                   <h4 className="text-xs font-black text-slate-700 uppercase tracking-wider mb-4 pb-2 border-b border-slate-200 flex items-center justify-between">
                     <span>Cash Summary Details</span>
                     <span className="text-[10px] font-bold text-slate-400">BDT</span>
                   </h4>
-                  <div className="space-y-3">
-                    {[
-                      { label: 'KHA Office Cash', value: khaOfficeCash, setter: setKhaOfficeCash, id: 'modalKhaOfficeCash' },
-                      { label: 'Dhaka office', value: dhakaOfficeCash, setter: setDhakaOfficeCash, id: 'modalDhakaOfficeCash' },
-                      { label: 'Nayan Cash', value: nayanCash, setter: setNayanCash, id: 'modalNayanCash' },
-                      { label: 'Account Cash', value: accountCash, setter: setAccountCash, id: 'modalAccountCash' },
-                    ].map((item) => (
-                      <div key={item.id} className="flex items-center justify-between gap-3">
-                        <label className="text-xs font-bold text-slate-600" htmlFor={item.id}>{item.label}</label>
-                        <div className="relative w-32">
-                          <span className="absolute left-3 top-2 text-[10px] font-bold text-slate-400">৳</span>
-                          <input
-                            type="number"
-                            id={item.id}
-                            value={item.value}
-                            disabled={isDateAlreadyClosed}
-                            onChange={(e) => item.setter(e.target.value)}
-                            className="w-full text-xs pl-6 pr-3 py-1.5 bg-white border border-slate-200 rounded-xl text-slate-700 focus:ring-1 focus:ring-indigo-500 focus:outline-none font-bold font-mono text-right disabled:bg-slate-100 disabled:text-slate-500"
-                          />
-                        </div>
-                      </div>
-                    ))}
-                    <div className="pt-2.5 mt-2 border-t border-slate-200 flex items-center justify-between text-xs font-extrabold text-indigo-700">
-                      <span>Total Physical Cash</span>
-                      <span className="font-mono">
-                        {(val(khaOfficeCash) + val(dhakaOfficeCash) + val(nayanCash) + val(accountCash)).toLocaleString()} ৳
-                      </span>
-                    </div>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-xs text-left border-collapse">
+                      <thead>
+                        <tr className="border-b border-slate-200 text-[10px] font-bold text-slate-500 uppercase">
+                          <th className="py-2 px-2">Description</th>
+                          <th className="py-2 px-2 text-right w-32">Opening Balance</th>
+                          <th className="py-2 px-2 text-right w-32">Today Amount</th>
+                          <th className="py-2 px-2 text-right w-32">Total Amount</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {[
+                          { label: 'Khagrachari Office Cash', openVal: khaOpening, setOpen: setKhaOpening, todayVal: khaOfficeCash, setToday: setKhaOfficeCash },
+                          { label: 'Dhaka Office Cash', openVal: dhakaOpening, setOpen: setDhakaOpening, todayVal: dhakaOfficeCash, setToday: setDhakaOfficeCash },
+                          { label: 'bKash Merchants Cash', openVal: nayanOpening, setOpen: setNayanOpening, todayVal: nayanCash, setToday: setNayanCash },
+                          { label: 'Khagrachari Account Cash (P)', openVal: accountOpening, setOpen: setAccountOpening, todayVal: accountCash, setToday: setAccountCash },
+                        ].map((row, idx) => {
+                          const openNum = val(row.openVal);
+                          const todayNum = val(row.todayVal);
+                          const totalNum = openNum + todayNum;
+                          return (
+                            <tr key={idx} className="hover:bg-slate-100/50">
+                              <td className="py-2.5 px-2 font-bold text-slate-700">{row.label}</td>
+                              <td className="py-2 px-2 text-right">
+                                <div className="relative">
+                                  <span className="absolute left-2.5 top-2 text-[10px] font-bold text-slate-400">৳</span>
+                                  <input
+                                    type="number"
+                                    value={row.openVal}
+                                    disabled={isDateAlreadyClosed}
+                                    onChange={(e) => row.setOpen(e.target.value)}
+                                    className="w-full text-xs pl-6 pr-2.5 py-1.5 bg-white border border-slate-200 rounded-xl text-slate-700 focus:ring-1 focus:ring-indigo-500 font-bold font-mono text-right disabled:bg-slate-100"
+                                  />
+                                </div>
+                              </td>
+                              <td className="py-2 px-2 text-right">
+                                <div className="relative">
+                                  <span className="absolute left-2.5 top-2 text-[10px] font-bold text-slate-400">৳</span>
+                                  <input
+                                    type="number"
+                                    value={row.todayVal}
+                                    disabled={isDateAlreadyClosed}
+                                    onChange={(e) => row.setToday(e.target.value)}
+                                    className="w-full text-xs pl-6 pr-2.5 py-1.5 bg-white border border-slate-200 rounded-xl text-slate-700 focus:ring-1 focus:ring-indigo-500 font-bold font-mono text-right disabled:bg-slate-100"
+                                  />
+                                </div>
+                              </td>
+                              <td className="py-2.5 px-2 text-right font-mono font-extrabold text-indigo-700">
+                                {totalNum.toLocaleString()} ৳
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                      <tfoot>
+                        <tr className="border-t border-slate-200 font-extrabold text-xs text-slate-900 bg-slate-100/70">
+                          <td className="py-2.5 px-2">Total Physical Cash</td>
+                          <td className="py-2.5 px-2 text-right font-mono">
+                            {(val(khaOpening) + val(dhakaOpening) + val(nayanOpening) + val(accountOpening)).toLocaleString()} ৳
+                          </td>
+                          <td className="py-2.5 px-2 text-right font-mono">
+                            {(val(khaOfficeCash) + val(dhakaOfficeCash) + val(nayanCash) + val(accountCash)).toLocaleString()} ৳
+                          </td>
+                          <td className="py-2.5 px-2 text-right font-mono text-indigo-700">
+                            {(
+                              val(khaOpening) + val(khaOfficeCash) +
+                              val(dhakaOpening) + val(dhakaOfficeCash) +
+                              val(nayanOpening) + val(nayanCash) +
+                              val(accountOpening) + val(accountCash)
+                            ).toLocaleString()} ৳
+                          </td>
+                        </tr>
+                      </tfoot>
+                    </table>
                   </div>
                 </div>
 
-                {/* Transfer Money Details */}
-                <div className="border border-slate-200/60 rounded-2xl p-4 bg-slate-50/50">
+                {/* Transfer Money Details Table */}
+                <div className="col-span-full border border-slate-200/60 rounded-2xl p-4 bg-slate-50/50">
                   <h4 className="text-xs font-black text-slate-700 uppercase tracking-wider mb-4 pb-2 border-b border-slate-200 flex items-center justify-between">
                     <span>Transfer Money Details</span>
                     <span className="text-[10px] font-bold text-slate-400">BDT</span>
                   </h4>
-                  <div className="space-y-3">
-                    {[
-                      { label: 'KHA Office to Nayan', value: transferKhaToNayan, setter: setTransferKhaToNayan, id: 'modalTransferKhaToNayan' },
-                      { label: 'Nayan to Dhaka office', value: transferNayanToDhaka, setter: setTransferNayanToDhaka, id: 'modalTransferNayanToDhaka' },
-                      { label: 'Dhaka office to Nayan', value: transferDhakaToNayan, setter: setTransferDhakaToNayan, id: 'modalTransferDhakaToNayan' },
-                      { label: 'Dhaka to KHA Office', value: transferDhakaToKha, setter: setTransferDhakaToKha, id: 'modalTransferDhakaToKha' },
-                    ].map((item) => (
-                      <div key={item.id} className="flex items-center justify-between gap-3">
-                        <label className="text-xs font-bold text-slate-600" htmlFor={item.id}>{item.label}</label>
-                        <div className="relative w-32">
-                          <span className="absolute left-3 top-2 text-[10px] font-bold text-slate-400">৳</span>
-                          <input
-                            type="number"
-                            id={item.id}
-                            value={item.value}
-                            disabled={isDateAlreadyClosed}
-                            onChange={(e) => item.setter(e.target.value)}
-                            className="w-full text-xs pl-6 pr-3 py-1.5 bg-white border border-slate-200 rounded-xl text-slate-700 focus:ring-1 focus:ring-indigo-500 focus:outline-none font-bold font-mono text-right disabled:bg-slate-100 disabled:text-slate-500"
-                          />
-                        </div>
-                      </div>
-                    ))}
-                    <div className="pt-2.5 mt-2 border-t border-slate-200 flex items-center justify-between text-xs font-extrabold text-slate-700">
-                      <span>Total Transfers</span>
-                      <span className="font-mono">
-                        {(val(transferKhaToNayan) + val(transferNayanToDhaka) + val(transferDhakaToNayan) + val(transferDhakaToKha)).toLocaleString()} ৳
-                      </span>
-                    </div>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-xs text-left border-collapse">
+                      <thead>
+                        <tr className="border-b border-slate-200 text-[10px] font-bold text-slate-500 uppercase">
+                          <th className="py-2 px-2">Description</th>
+                          <th className="py-2 px-2 text-right w-32">Opening Balance</th>
+                          <th className="py-2 px-2 text-right w-32">Today Amount</th>
+                          <th className="py-2 px-2 text-right w-32">Total Amount</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {[
+                          { label: 'Khagrachari Office to Dhaka Office', openVal: transferKhaDhakaOpening, setOpen: setTransferKhaDhakaOpening, todayVal: transferKhaDhakaToday, setToday: setTransferKhaDhakaToday },
+                          { label: 'Dhaka Office to Khagrachari Office', openVal: transferDhakaKhaOpening, setOpen: setTransferDhakaKhaOpening, todayVal: transferDhakaKhaToday, setToday: setTransferDhakaKhaToday },
+                          { label: 'bKash Merchants to Khagrachari Account', openVal: transferBkashAccountOpening, setOpen: setTransferBkashAccountOpening, todayVal: transferBkashAccountToday, setToday: setTransferBkashAccountToday },
+                          { label: 'Khagrachari Account to Dhaka Office', openVal: transferAccountDhakaOpening, setOpen: setTransferAccountDhakaOpening, todayVal: transferAccountDhakaToday, setToday: setTransferAccountDhakaToday },
+                        ].map((row, idx) => {
+                          const openNum = val(row.openVal);
+                          const todayNum = val(row.todayVal);
+                          const totalNum = openNum + todayNum;
+                          return (
+                            <tr key={idx} className="hover:bg-slate-100/50">
+                              <td className="py-2.5 px-2 font-bold text-slate-700">{row.label}</td>
+                              <td className="py-2 px-2 text-right">
+                                <div className="relative">
+                                  <span className="absolute left-2.5 top-2 text-[10px] font-bold text-slate-400">৳</span>
+                                  <input
+                                    type="number"
+                                    value={row.openVal}
+                                    disabled={isDateAlreadyClosed}
+                                    onChange={(e) => row.setOpen(e.target.value)}
+                                    className="w-full text-xs pl-6 pr-2.5 py-1.5 bg-white border border-slate-200 rounded-xl text-slate-700 focus:ring-1 focus:ring-indigo-500 font-bold font-mono text-right disabled:bg-slate-100"
+                                  />
+                                </div>
+                              </td>
+                              <td className="py-2 px-2 text-right">
+                                <div className="relative">
+                                  <span className="absolute left-2.5 top-2 text-[10px] font-bold text-slate-400">৳</span>
+                                  <input
+                                    type="number"
+                                    value={row.todayVal}
+                                    disabled={isDateAlreadyClosed}
+                                    onChange={(e) => row.setToday(e.target.value)}
+                                    className="w-full text-xs pl-6 pr-2.5 py-1.5 bg-white border border-slate-200 rounded-xl text-slate-700 focus:ring-1 focus:ring-indigo-500 font-bold font-mono text-right disabled:bg-slate-100"
+                                  />
+                                </div>
+                              </td>
+                              <td className="py-2.5 px-2 text-right font-mono font-extrabold text-indigo-700">
+                                {totalNum.toLocaleString()} ৳
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                      <tfoot>
+                        <tr className="border-t border-slate-200 font-extrabold text-xs text-slate-900 bg-slate-100/70">
+                          <td className="py-2.5 px-2">Total Transfers</td>
+                          <td className="py-2.5 px-2 text-right font-mono">
+                            {(val(transferKhaDhakaOpening) + val(transferDhakaKhaOpening) + val(transferBkashAccountOpening) + val(transferAccountDhakaOpening)).toLocaleString()} ৳
+                          </td>
+                          <td className="py-2.5 px-2 text-right font-mono">
+                            {(val(transferKhaDhakaToday) + val(transferDhakaKhaToday) + val(transferBkashAccountToday) + val(transferAccountDhakaToday)).toLocaleString()} ৳
+                          </td>
+                          <td className="py-2.5 px-2 text-right font-mono text-indigo-700">
+                            {(
+                              val(transferKhaDhakaOpening) + val(transferKhaDhakaToday) +
+                              val(transferDhakaKhaOpening) + val(transferDhakaKhaToday) +
+                              val(transferBkashAccountOpening) + val(transferBkashAccountToday) +
+                              val(transferAccountDhakaOpening) + val(transferAccountDhakaToday)
+                            ).toLocaleString()} ৳
+                          </td>
+                        </tr>
+                      </tfoot>
+                    </table>
                   </div>
                 </div>
               </div>
@@ -5141,7 +5836,7 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile, 
               }
             ` }} />
             <div
-              className="bg-white rounded-3xl max-w-4xl w-full p-5 sm:p-6 shadow-2xl relative overflow-hidden animate-scale-up border border-slate-100 my-8 max-h-[90vh] flex flex-col"
+              className="bg-white rounded-3xl max-w-5xl w-full p-5 sm:p-6 shadow-2xl relative overflow-hidden animate-scale-up border border-slate-100 my-8 max-h-[90vh] flex flex-col"
               onClick={(e) => e.stopPropagation()}
             >
               {/* Modal Header */}
@@ -5256,64 +5951,108 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile, 
                   </div>
                 </div>
 
-                {/* Cash Details Snapshot & Monthly Transfers */}
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  <div className="bg-slate-50/50 rounded-2xl p-4 border border-slate-200/60">
-                    <h4 className="text-[11px] font-black text-indigo-950 uppercase tracking-wider mb-3 pb-1.5 border-b border-slate-200 flex items-center justify-between">
-                      <span>Latest Physical Cash</span>
-                      <span className="text-[10px] font-mono text-slate-400">
-                        {monthSummary.latestDrawerDoc ? monthSummary.latestDrawerDoc.date : 'No Entry'}
-                      </span>
-                    </h4>
-                    <div className="space-y-1.5 text-xs">
-                      <div className="flex justify-between py-0.5">
-                        <span className="text-slate-500">KHA Office Cash</span>
-                        <span className="font-mono font-bold text-slate-800">{(monthSummary.latestDrawerDoc?.khaOfficeCash ?? 0).toLocaleString()} ৳</span>
-                      </div>
-                      <div className="flex justify-between py-0.5">
-                        <span className="text-slate-500">Dhaka Office Cash</span>
-                        <span className="font-mono font-bold text-slate-800">{(monthSummary.latestDrawerDoc?.dhakaOfficeCash ?? 0).toLocaleString()} ৳</span>
-                      </div>
-                      <div className="flex justify-between py-0.5">
-                        <span className="text-slate-500">Nayan Cash</span>
-                        <span className="font-mono font-bold text-slate-800">{(monthSummary.latestDrawerDoc?.nayanCash ?? 0).toLocaleString()} ৳</span>
-                      </div>
-                      <div className="flex justify-between py-0.5">
-                        <span className="text-slate-500">Account Cash</span>
-                        <span className="font-mono font-bold text-slate-800">{(monthSummary.latestDrawerDoc?.accountCash ?? 0).toLocaleString()} ৳</span>
-                      </div>
-                      <div className="flex justify-between pt-2 mt-1 border-t border-slate-200 font-bold text-indigo-700">
-                        <span>Total Physical Cash</span>
-                        <span className="font-mono">{latestCashTotal.toLocaleString()} ৳</span>
+                {/* Cash Details Snapshot (Left) & Monthly Transfers (Right) Side-by-Side */}
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 items-stretch">
+                  {/* Cash Summary Details Table (Left) */}
+                  <div className="bg-slate-50/50 rounded-2xl p-4 border border-slate-200/60 flex flex-col justify-between">
+                    <div>
+                      <h4 className="text-[11px] font-black text-indigo-950 uppercase tracking-wider mb-3 pb-1.5 border-b border-slate-200 flex items-center justify-between gap-2">
+                        <span>Cash Summary Details (Latest Snapshot)</span>
+                        <span className="text-[10px] font-mono text-slate-400 shrink-0">
+                          {monthSummary.latestDrawerDoc ? monthSummary.latestDrawerDoc.date : 'No Entry'}
+                        </span>
+                      </h4>
+                      <div className="overflow-x-auto">
+                        <table className="w-full text-left border-collapse text-[11px]">
+                          <thead>
+                            <tr className="border-b border-slate-200 text-[9px] font-bold text-slate-500 uppercase tracking-wider">
+                              <th className="py-1.5 px-1.5">Description</th>
+                              <th className="py-1.5 px-1.5 text-right whitespace-nowrap">Opening Balance</th>
+                              <th className="py-1.5 px-1.5 text-right whitespace-nowrap">Today Amount</th>
+                              <th className="py-1.5 px-1.5 text-right whitespace-nowrap">Total Amount</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-slate-100">
+                            {[
+                              { label: 'Khagrachari Office Cash', open: monthSummary.physicalCash.khaOpening, today: monthSummary.physicalCash.khaToday, total: monthSummary.physicalCash.khaTotal },
+                              { label: 'Dhaka Office Cash', open: monthSummary.physicalCash.dhakaOpening, today: monthSummary.physicalCash.dhakaToday, total: monthSummary.physicalCash.dhakaTotal },
+                              { label: 'bKash Merchants Cash', open: monthSummary.physicalCash.nayanOpening, today: monthSummary.physicalCash.nayanToday, total: monthSummary.physicalCash.nayanTotal },
+                              { label: 'Khagrachari Account Cash (P)', open: monthSummary.physicalCash.accountOpening, today: monthSummary.physicalCash.accountToday, total: monthSummary.physicalCash.accountTotal },
+                            ].map((row, idx) => (
+                              <tr key={idx} className="hover:bg-white transition">
+                                <td className="py-1.5 px-1.5 font-semibold text-slate-700">{row.label}</td>
+                                <td className="py-1.5 px-1.5 text-right font-mono text-slate-600 whitespace-nowrap">{row.open.toLocaleString()} ৳</td>
+                                <td className="py-1.5 px-1.5 text-right font-mono text-slate-600 whitespace-nowrap">{row.today.toLocaleString()} ৳</td>
+                                <td className="py-1.5 px-1.5 text-right font-mono font-bold text-slate-800 whitespace-nowrap">{row.total.toLocaleString()} ৳</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                          <tfoot>
+                            <tr className="border-t border-slate-200 font-bold text-[11px] bg-slate-100/70">
+                              <td className="py-2 px-1.5 text-slate-800">Total Physical Cash</td>
+                              <td className="py-2 px-1.5 text-right font-mono text-slate-700 whitespace-nowrap">
+                                {monthSummary.physicalCash.totalOpening.toLocaleString()} ৳
+                              </td>
+                              <td className="py-2 px-1.5 text-right font-mono text-slate-700 whitespace-nowrap">
+                                {monthSummary.physicalCash.totalToday.toLocaleString()} ৳
+                              </td>
+                              <td className="py-2 px-1.5 text-right font-mono text-indigo-700 font-extrabold whitespace-nowrap">
+                                {monthSummary.physicalCash.total.toLocaleString()} ৳
+                              </td>
+                            </tr>
+                          </tfoot>
+                        </table>
                       </div>
                     </div>
                   </div>
 
-                  <div className="bg-slate-50/50 rounded-2xl p-4 border border-slate-200/60">
-                    <h4 className="text-[11px] font-black text-slate-700 uppercase tracking-wider mb-3 pb-1.5 border-b border-slate-200 flex items-center justify-between">
-                      <span>Monthly Cash Transfers</span>
-                      <span className="text-[10px] font-mono text-slate-400">{monthSummary.month}</span>
-                    </h4>
-                    <div className="space-y-1.5 text-xs">
-                      <div className="flex justify-between py-0.5">
-                        <span className="text-slate-500">KHA Office to Nayan</span>
-                        <span className="font-mono font-bold text-slate-800">{monthSummary.transfers.khaToNayan.toLocaleString()} ৳</span>
-                      </div>
-                      <div className="flex justify-between py-0.5">
-                        <span className="text-slate-500">Nayan to Dhaka office</span>
-                        <span className="font-mono font-bold text-slate-800">{monthSummary.transfers.nayanToDhaka.toLocaleString()} ৳</span>
-                      </div>
-                      <div className="flex justify-between py-0.5">
-                        <span className="text-slate-500">Dhaka office to Nayan</span>
-                        <span className="font-mono font-bold text-slate-800">{monthSummary.transfers.dhakaToNayan.toLocaleString()} ৳</span>
-                      </div>
-                      <div className="flex justify-between py-0.5">
-                        <span className="text-slate-500">Dhaka office to KHA Office</span>
-                        <span className="font-mono font-bold text-slate-800">{monthSummary.transfers.dhakaToKha.toLocaleString()} ৳</span>
-                      </div>
-                      <div className="flex justify-between pt-2 mt-1 border-t border-slate-200 font-bold text-slate-700">
-                        <span>Total Transfers</span>
-                        <span className="font-mono">{monthSummary.transfers.total.toLocaleString()} ৳</span>
+                  {/* Monthly Cash Transfers Table (Right) */}
+                  <div className="bg-slate-50/50 rounded-2xl p-4 border border-slate-200/60 flex flex-col justify-between">
+                    <div>
+                      <h4 className="text-[11px] font-black text-slate-700 uppercase tracking-wider mb-3 pb-1.5 border-b border-slate-200 flex items-center justify-between gap-2">
+                        <span>Monthly Cash Transfers Details</span>
+                        <span className="text-[10px] font-mono text-slate-400 shrink-0">{monthSummary.month}</span>
+                      </h4>
+                      <div className="overflow-x-auto">
+                        <table className="w-full text-left border-collapse text-[11px]">
+                          <thead>
+                            <tr className="border-b border-slate-200 text-[9px] font-bold text-slate-500 uppercase tracking-wider">
+                              <th className="py-1.5 px-1.5">Description</th>
+                              <th className="py-1.5 px-1.5 text-right whitespace-nowrap">Opening Balance</th>
+                              <th className="py-1.5 px-1.5 text-right whitespace-nowrap">Month Amount</th>
+                              <th className="py-1.5 px-1.5 text-right whitespace-nowrap">Total Amount</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-slate-100">
+                            {[
+                              { label: 'Khagrachari Office to Dhaka Office', open: monthSummary.transfers.khaDhakaOpening, today: monthSummary.transfers.khaDhakaToday, total: monthSummary.transfers.khaToNayan },
+                              { label: 'Dhaka Office to Khagrachari Office', open: monthSummary.transfers.dhakaKhaOpening, today: monthSummary.transfers.dhakaKhaToday, total: monthSummary.transfers.nayanToDhaka },
+                              { label: 'bKash Merchants to Khagrachari Account', open: monthSummary.transfers.bkashAccountOpening, today: monthSummary.transfers.bkashAccountToday, total: monthSummary.transfers.dhakaToNayan },
+                              { label: 'Khagrachari Account to Dhaka Office', open: monthSummary.transfers.accountDhakaOpening, today: monthSummary.transfers.accountDhakaToday, total: monthSummary.transfers.dhakaToKha },
+                            ].map((row, idx) => (
+                              <tr key={idx} className="hover:bg-white transition">
+                                <td className="py-1.5 px-1.5 font-semibold text-slate-700">{row.label}</td>
+                                <td className="py-1.5 px-1.5 text-right font-mono text-slate-600 whitespace-nowrap">{row.open.toLocaleString()} ৳</td>
+                                <td className="py-1.5 px-1.5 text-right font-mono text-slate-600 whitespace-nowrap">{row.today.toLocaleString()} ৳</td>
+                                <td className="py-1.5 px-1.5 text-right font-mono font-bold text-slate-800 whitespace-nowrap">{row.total.toLocaleString()} ৳</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                          <tfoot>
+                            <tr className="border-t border-slate-200 font-bold text-[11px] bg-slate-100/70">
+                              <td className="py-2 px-1.5 text-slate-800">Total Transfers</td>
+                              <td className="py-2 px-1.5 text-right font-mono text-slate-700 whitespace-nowrap">
+                                {monthSummary.transfers.totalOpening.toLocaleString()} ৳
+                              </td>
+                              <td className="py-2 px-1.5 text-right font-mono text-slate-700 whitespace-nowrap">
+                                {monthSummary.transfers.totalToday.toLocaleString()} ৳
+                              </td>
+                              <td className="py-2 px-1.5 text-right font-mono text-indigo-700 font-extrabold whitespace-nowrap">
+                                {monthSummary.transfers.total.toLocaleString()} ৳
+                              </td>
+                            </tr>
+                          </tfoot>
+                        </table>
                       </div>
                     </div>
                   </div>

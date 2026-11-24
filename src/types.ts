@@ -221,10 +221,35 @@ export interface DailyClosing {
   nayanCash?: number;
   accountCash?: number;
 
+  khaOpeningCash?: number;
+  khaTodayCash?: number;
+  dhakaOpeningCash?: number;
+  dhakaTodayCash?: number;
+  nayanOpeningCash?: number;
+  nayanTodayCash?: number;
+  accountOpeningCash?: number;
+  accountTodayCash?: number;
+
   transferKhaToNayan?: number;
   transferNayanToDhaka?: number;
   transferDhakaToNayan?: number;
   transferDhakaToKha?: number;
+
+  transferKhaDhakaOpening?: number;
+  transferKhaDhakaToday?: number;
+  transferKhaDhakaTotal?: number;
+
+  transferDhakaKhaOpening?: number;
+  transferDhakaKhaToday?: number;
+  transferDhakaKhaTotal?: number;
+
+  transferBkashAccountOpening?: number;
+  transferBkashAccountToday?: number;
+  transferBkashAccountTotal?: number;
+
+  transferAccountDhakaOpening?: number;
+  transferAccountDhakaToday?: number;
+  transferAccountDhakaTotal?: number;
   isDrawerSubmitted?: boolean;
 }
 
