@@ -494,9 +494,10 @@ export default function App() {
       return false;
     }
 
-    // 2. Filter out rejected home user bills
-    const isHomeUserBill = t.category === 'customer_bill' || !!t.clientId || t.title.includes('Home User') || t.title.includes('হোম ইউজার') || (t.notes && (t.notes.includes('Manual Bill') || t.notes.includes('ম্যানুয়াল বিল জমা')));
-    if (isHomeUserBill) {
+    // 2. Filter out rejected home user / reseller bills
+    const isResellerBill = t.category === 'reseller_bill' || (t.title && (t.title.includes('Reseller') || t.title.includes('রিসেলার'))) || (t.notes && (t.notes.includes('Reseller') || t.notes.includes('রিসেলার')));
+    const isHomeUserBill = !isResellerBill && (t.category === 'customer_bill' || !!t.clientId || (t.title && (t.title.includes('Home User') || t.title.includes('Home Subscriber') || t.title.includes('হোম ইউজার'))) || (t.notes && (t.notes.includes('Manual Bill') || t.notes.includes('ম্যানুয়াল বিল জমা'))));
+    if (isHomeUserBill || isResellerBill) {
       return t.status !== 'rejected'; // Show all except explicitly rejected ones
     }
     return true; // standard transactions are shown immediately

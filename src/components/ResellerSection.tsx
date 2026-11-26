@@ -557,10 +557,15 @@ export function ResellerSection({ userId, onAddTransaction, transactions, curren
       (t.notes && (t.notes.includes('Daily Closing entry statement:') || t.notes.includes('Daily Closing expense statement:')));
     if (isDailyClosing) return false;
 
+    // Strictly exclude Home User bills
+    const isHomeUserBill =
+      t.category === 'customer_bill' ||
+      (t.title && (t.title.includes('Home Subscriber') || t.title.includes('Home User') || t.title.includes('হোম ইউজার')));
+    if (isHomeUserBill) return false;
+
     return (
       t.category === 'reseller_bill' || 
-      t.title.includes('Reseller') || 
-      t.title.includes('রিসেলার') ||
+      (t.title && (t.title.includes('Reseller') || t.title.includes('রিসেলার'))) ||
       (t.notes && (t.notes.includes('Reseller') || t.notes.includes('রিসেলার')))
     );
   }).map(t => ({

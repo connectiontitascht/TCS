@@ -106,11 +106,12 @@ export function VoucherSection({ userId, onAddTransaction, currentUserProfile }:
   // Viewing Attachment State
   const [viewingAttachment, setViewingAttachment] = useState<{ name: string; data: string } | null>(null);
 
+  const isAdmin = !currentUserProfile || currentUserProfile.role === 'admin' || currentUserProfile.email?.toLowerCase() === 'connection.titascht@gmail.com';
+
   // Helper to check role-based approval permissions
   const hasApprovalPermission = (voucher: Voucher | null): boolean => {
     if (!voucher) return false;
-    if (!currentUserProfile) return true; // default fallback
-    if (currentUserProfile.role === 'admin') return true; // Admin has full access to everything
+    if (isAdmin) return true; // Admin has full access to everything
 
     if (voucher.status === 'pending') {
       return !!currentUserProfile.permissions?.canApproveSupervisor;
@@ -1448,6 +1449,10 @@ export function VoucherSection({ userId, onAddTransaction, currentUserProfile }:
     auditNote?: string,
     approverName?: string
   ) => {
+    if (newStatus === 'pending' && (voucher.status === 'approved' || voucher.status === 'rejected') && !isAdmin) {
+      alert('Access Denied: Only System Administrators can send approved or cancelled vouchers back for review.');
+      return;
+    }
     if (currentUserProfile && newStatus !== 'pending') {
       if (!hasApprovalPermission(voucher)) {
         alert('Access Denied: You do not have permission to approve or reject this voucher at its current stage.');
@@ -2752,7 +2757,7 @@ export function VoucherSection({ userId, onAddTransaction, currentUserProfile }:
                                   </button>
                                 </>
                               )}
-                              {(voucher.status === 'approved' || voucher.status === 'rejected') && (
+                              {isAdmin && (voucher.status === 'approved' || voucher.status === 'rejected') && (
                                 <button
                                   onClick={() => handleUpdateStatus(voucher, 'pending')}
                                   className="px-2 py-1 bg-slate-200 hover:bg-slate-300 text-slate-700 rounded-lg text-[9px] font-bold transition cursor-pointer"

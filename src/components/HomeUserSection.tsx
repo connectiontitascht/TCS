@@ -246,15 +246,7 @@ export function HomeUserSection({ userId, onAddTransaction, transactions, curren
   const canReviewAgainBill = (bill: Transaction | null): boolean => {
     if (!bill) return false;
     if (!currentUserProfile) return true;
-    if (currentUserProfile.role === 'admin' || currentUserProfile.email?.toLowerCase() === 'connection.titascht@gmail.com') return true;
-    return !!(
-      currentUserProfile.permissions?.canApproveSupervisor ||
-      currentUserProfile.permissions?.canApproveManager ||
-      currentUserProfile.permissions?.canApproveAccounts ||
-      currentUserProfile.role === 'supervisor' ||
-      currentUserProfile.role === 'manager' ||
-      currentUserProfile.role === 'accountant'
-    );
+    return currentUserProfile.role === 'admin' || currentUserProfile.email?.toLowerCase() === 'connection.titascht@gmail.com';
   };
 
   const openApprovalModal = (
@@ -375,7 +367,7 @@ export function HomeUserSection({ userId, onAddTransaction, transactions, curren
   const handleReviewAgain = async (billId: string) => {
     const bill = (transactions || []).find(t => t.id === billId);
     if (!canReviewAgainBill(bill || null)) {
-      setDeleteAccessDeniedNotice('Access Denied: Only authorized approvers (Supervisor, Manager, Accountant) or Admin can send bills back for review.');
+      setDeleteAccessDeniedNotice('Access Denied: Only System Administrators can send bills back for review.');
       return;
     }
     await handleUpdateStatus(billId, 'pending_supervisor');
@@ -1000,11 +992,17 @@ export function HomeUserSection({ userId, onAddTransaction, transactions, curren
       (t.notes && (t.notes.includes('Daily Closing entry statement:') || t.notes.includes('Daily Closing expense statement:')));
     if (isDailyClosing) return false;
 
+    // Strictly exclude Reseller section bills so they never appear in Home User section
+    const isResellerBill =
+      t.category === 'reseller_bill' ||
+      (t.title && (t.title.includes('Reseller') || t.title.includes('রিসেলার'))) ||
+      (t.notes && (t.notes.includes('Reseller') || t.notes.includes('রিসেলার')));
+    if (isResellerBill) return false;
+
     return (
       t.category === 'customer_bill' || 
       !!t.clientId || 
-      t.title.includes('হোম ইউজার') || 
-      t.title.includes('Home Subscriber') ||
+      (t.title && (t.title.includes('হোম ইউজার') || t.title.includes('Home Subscriber') || t.title.includes('Home User'))) ||
       (t.notes && (t.notes.includes('ম্যানুয়াল বিল জমা') || t.notes.includes('Manual bill collection')))
     );
   }).map(t => ({
@@ -2583,27 +2581,15 @@ export function HomeUserSection({ userId, onAddTransaction, transactions, curren
                               </>
                             )}
 
-                            {(bill.status === 'approved' || bill.status === 'rejected') && (
-                              canReviewAgainBill(bill) ? (
-                                <button
-                                  type="button"
-                                  onClick={() => handleReviewAgain(bill.id)}
-                                  className="px-2 py-1 bg-slate-200 hover:bg-slate-300 text-slate-700 rounded-lg text-[9px] font-bold transition cursor-pointer whitespace-nowrap"
-                                  title="Send back for review"
-                                >
-                                  Review Again
-                                </button>
-                              ) : (
-                                <button
-                                  type="button"
-                                  onClick={() => setDeleteAccessDeniedNotice('Access Denied: Only authorized approvers or Admin can send bills back for review.')}
-                                  className="px-2 py-1 bg-slate-100 hover:bg-slate-200 text-slate-400 rounded-lg text-[9px] font-semibold transition cursor-pointer whitespace-nowrap flex items-center gap-1 border border-slate-200/60"
-                                  title="Requires approval role to review"
-                                >
-                                  <Lock className="w-2.5 h-2.5 text-slate-400" />
-                                  <span>Review Again</span>
-                                </button>
-                              )
+                            {isAdmin && (bill.status === 'approved' || bill.status === 'rejected') && (
+                              <button
+                                type="button"
+                                onClick={() => handleReviewAgain(bill.id)}
+                                className="px-2 py-1 bg-slate-200 hover:bg-slate-300 text-slate-700 rounded-lg text-[9px] font-bold transition cursor-pointer whitespace-nowrap"
+                                title="Send back for review"
+                              >
+                                Review Again
+                              </button>
                             )}
 
                             {/* Download Slip Button */}

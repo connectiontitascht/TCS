@@ -46,10 +46,17 @@ export function BudgetSummary({ transactions, resellers = [], allTransactions = 
       const isDailyClosing = t.isDailyClosing === true || 
         (t.notes && (t.notes.includes('Daily Closing entry statement:') || t.notes.includes('Daily Closing expense statement:')));
       if (isDailyClosing) return false;
+
+      const isResellerBill =
+        t.category === 'reseller_bill' ||
+        (t.title && (t.title.includes('Reseller') || t.title.includes('রিসেলার'))) ||
+        (t.notes && (t.notes.includes('Reseller') || t.notes.includes('রিসেলার')));
+      if (isResellerBill) return false;
+
       return (
         t.category === 'customer_bill' || 
         !!t.clientId || 
-        (t.title && (t.title.includes('হোম ইউজার') || t.title.includes('Home Subscriber'))) ||
+        (t.title && (t.title.includes('হোম ইউজার') || t.title.includes('Home Subscriber') || t.title.includes('Home User'))) ||
         (t.notes && (t.notes.includes('ম্যানুয়াল বিল জমা') || t.notes.includes('Manual bill collection')))
       );
     });
@@ -98,6 +105,10 @@ export function BudgetSummary({ transactions, resellers = [], allTransactions = 
       const isDailyClosing = t.isDailyClosing === true || 
         (t.notes && (t.notes.includes('Daily Closing entry statement:') || t.notes.includes('Daily Closing expense statement:')));
       if (isDailyClosing) return false;
+      const isHomeUserBill =
+        t.category === 'customer_bill' ||
+        (t.title && (t.title.includes('Home Subscriber') || t.title.includes('Home User') || t.title.includes('হোম ইউজার')));
+      if (isHomeUserBill) return false;
       return (
         t.category === 'reseller_bill' || 
         (t.title && (t.title.includes('Reseller') || t.title.includes('রিসেলার'))) ||

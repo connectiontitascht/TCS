@@ -59,8 +59,10 @@ export function TransactionList({ transactions, onDeleteTransaction, onDeleteAll
     let cleaned = title;
     cleaned = cleaned.replace(/Home Subscriber Monthly Bill:\s*/gi, '');
     cleaned = cleaned.replace(/Home User Monthly Bill:\s*/gi, '');
+    cleaned = cleaned.replace(/Reseller Monthly Bill:\s*/gi, '');
     cleaned = cleaned.replace(/হোম ইউজার মাসিক বিল:\s*/g, '');
     cleaned = cleaned.replace(/হোম সাবস্ক্রাইবার মান্থলি বিল:\s*/g, '');
+    cleaned = cleaned.replace(/রিসেলার মাসিক বিল:\s*/g, '');
     cleaned = cleaned.replace(/Voucher Approved:\s*/gi, '');
     cleaned = cleaned.replace(/[()]/g, '');
     return cleaned.trim();
