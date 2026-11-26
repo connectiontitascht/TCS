@@ -50,6 +50,7 @@ import { VoucherSection } from './components/VoucherSection';
 import { DailyClosingSection } from './components/DailyClosingSection';
 import { SystemUsersSection } from './components/SystemUsersSection';
 import { NotificationBell } from './components/NotificationBell';
+import { sendWorkflowNotification } from './utils/notifications';
 
 // Default initial mock transactions in English to make the app gorgeous on first load
 const INITIAL_TRANSACTIONS: Transaction[] = [
@@ -378,7 +379,10 @@ export default function App() {
   }, [user, currentUserProfile]);
 
   // Handle adding transaction in Firebase
-  const handleAddTransaction = async (newTx: Omit<Transaction, 'id'>) => {
+  const handleAddTransaction = async (
+    newTx: Omit<Transaction, 'id'>,
+    options?: { skipNotification?: boolean }
+  ) => {
     if (!user) return;
     const newId = `tx-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
     const docRef = doc(db, 'transactions', newId);
@@ -404,16 +408,40 @@ export default function App() {
         receiverName: newTx.receiverName || '',
         status: newTx.status || 'approved',
       });
-      // Trigger notification
-      const notificationRef = doc(collection(db, 'notifications'));
-      await setDoc(notificationRef, {
-        id: notificationRef.id,
-        userId: user.uid,
-        type: 'new_transaction',
-        message: `New ${newTx.type} added: ${newTx.title}`,
-        read: false,
-        createdAt: serverTimestamp(),
-      });
+
+      if (!options?.skipNotification) {
+        const actorName = currentUserProfile?.displayName || currentUserProfile?.email || user.email || 'Staff';
+        if (newTx.status === 'pending_supervisor') {
+          const cleanName = newTx.title
+            .replace(/Home Subscriber Monthly Bill:\s*/gi, '')
+            .replace(/Home User Monthly Bill:\s*/gi, '')
+            .replace(/[()]/g, '')
+            .trim();
+          await sendWorkflowNotification({
+            targetRole: 'supervisor',
+            targetSection: 'home_user',
+            itemId: newId,
+            stepStatus: 'pending_supervisor',
+            title: 'New Bill Awaiting Supervisor',
+            type: 'bill_approval_step',
+            message: `Home User Bill for ${cleanName || 'Subscriber'} (৳${Number(newTx.amount || 0).toLocaleString()}) submitted by ${actorName} — waiting for Supervisor approval.`,
+            actorName,
+            actorEmail: user.email || currentUserProfile?.email,
+          });
+        } else {
+          await sendWorkflowNotification({
+            userId: user.uid,
+            targetRole: 'admin',
+            targetSection: newTx.category === 'reseller_bill' ? 'reseller' : 'history',
+            itemId: newId,
+            title: newTx.type === 'income' ? 'New Income Recorded' : 'New Expense Recorded',
+            type: 'new_transaction',
+            message: `${newTx.title} (৳${Number(newTx.amount || 0).toLocaleString()}) recorded by ${actorName}.`,
+            actorName,
+            actorEmail: user.email || currentUserProfile?.email,
+          });
+        }
+      }
     } catch (error) {
       handleFirestoreError(error, OperationType.WRITE, `transactions/${newId}`);
     }
@@ -851,7 +879,11 @@ export default function App() {
           </div>
 
           <div className="flex items-center gap-3">
-            <NotificationBell />
+            <NotificationBell
+              user={user}
+              currentUserProfile={currentUserProfile}
+              onNavigateSection={setActiveSection}
+            />
             {/* Desktop User profile details & Sign Out */}
             <div className="hidden md:flex items-center gap-3 pr-1">
               <div className="flex flex-col text-right">

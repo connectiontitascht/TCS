@@ -34,10 +34,11 @@ import {
 import { db, handleFirestoreError, OperationType } from '../firebase';
 import { Voucher, Transaction, EXPENSE_CATEGORY_LABELS, AppUser, SalaryLog } from '../types';
 import { PaymentMethodLogo } from './PaymentLogos';
+import { sendWorkflowNotification } from '../utils/notifications';
 
 interface VoucherSectionProps {
   userId: string;
-  onAddTransaction: (transaction: Omit<Transaction, 'id'>) => Promise<void>;
+  onAddTransaction: (transaction: Omit<Transaction, 'id'>, options?: { skipNotification?: boolean }) => Promise<void>;
   currentUserProfile?: AppUser | null;
 }
 
@@ -1414,6 +1415,18 @@ export function VoucherSection({ userId, onAddTransaction, currentUserProfile }:
         updatedAt: serverTimestamp(),
       });
 
+      await sendWorkflowNotification({
+        targetRole: 'supervisor',
+        targetSection: 'voucher',
+        itemId: voucherId,
+        stepStatus: 'pending',
+        title: 'New Voucher Awaiting Supervisor',
+        type: 'voucher_approval_step',
+        message: `Voucher ${finalTitle} (৳${parsedAmount.toLocaleString()}) submitted by ${submittedBy.trim()} — waiting for Supervisor approval.`,
+        actorName: submittedBy.trim() || currentUserProfile?.displayName || currentUserProfile?.email,
+        actorEmail: currentUserProfile?.email,
+      });
+
       setTitle('');
       setAmount('');
       setNotes('');
@@ -1514,6 +1527,9 @@ export function VoucherSection({ userId, onAddTransaction, currentUserProfile }:
         updatedAt: serverTimestamp(),
       });
 
+      const actorName = approverName || currentUserProfile?.displayName || currentUserProfile?.email || 'Authorized User';
+      const actorEmail = currentUserProfile?.email;
+
       // If transition to approved occurs, automatically post as an expense to App transactions
       if (newStatus === 'approved') {
         await onAddTransaction({
@@ -1526,15 +1542,102 @@ export function VoucherSection({ userId, onAddTransaction, currentUserProfile }:
           receivedBy: voucher.submittedBy,
           receivedDate: voucher.date,
           paymentMethod: voucher.paymentMethod || 'Cash'
+        }, { skipNotification: true });
+
+        await sendWorkflowNotification({
+          targetRole: 'admin',
+          targetSection: 'voucher',
+          itemId: voucher.id,
+          stepStatus: 'approved',
+          title: 'Voucher Finally Approved',
+          type: 'voucher_approval_step',
+          message: `Voucher ${voucher.title} (৳${voucher.amount.toLocaleString()}) finally approved by Accounts (${accBy}) and posted to expenses.`,
+          actorName: accBy,
+          actorEmail,
         });
+
+        if (voucher.userId && voucher.userId !== userId) {
+          await sendWorkflowNotification({
+            userId: voucher.userId,
+            targetSection: 'voucher',
+            itemId: voucher.id,
+            stepStatus: 'approved',
+            title: 'Your Voucher Was Approved',
+            type: 'voucher_approval_step',
+            message: `Voucher ${voucher.title} (৳${voucher.amount.toLocaleString()}) has been finally approved by Accounts (${accBy}).`,
+            actorName: accBy,
+            actorEmail,
+          });
+        }
+
         alert('The voucher has been fully approved by Supervisor, Manager & Accounts and automatically added as an expense to the main cash-out transactions!');
       } else if (newStatus === 'rejected') {
+        const reason = overrideReason !== undefined ? overrideReason : (voucher.rejectionReason || '');
+        await sendWorkflowNotification({
+          targetRole: 'admin',
+          targetSection: 'voucher',
+          itemId: voucher.id,
+          stepStatus: 'rejected',
+          title: 'Voucher Cancelled',
+          type: 'voucher_approval_step',
+          message: `Voucher ${voucher.title} (৳${voucher.amount.toLocaleString()}) was cancelled by ${actorName}.${reason ? ` Reason: ${reason}` : ''}`,
+          actorName,
+          actorEmail,
+        });
+
+        if (voucher.userId && voucher.userId !== userId) {
+          await sendWorkflowNotification({
+            userId: voucher.userId,
+            targetSection: 'voucher',
+            itemId: voucher.id,
+            stepStatus: 'rejected',
+            title: 'Your Voucher Was Cancelled',
+            type: 'voucher_approval_step',
+            message: `Voucher ${voucher.title} (৳${voucher.amount.toLocaleString()}) was cancelled by ${actorName}.${reason ? ` Reason: ${reason}` : ''}`,
+            actorName,
+            actorEmail,
+          });
+        }
+
         alert('The voucher has been cancelled successfully!');
       } else if (newStatus === 'waiting_manager') {
+        await sendWorkflowNotification({
+          targetRole: 'manager',
+          targetSection: 'voucher',
+          itemId: voucher.id,
+          stepStatus: 'waiting_manager',
+          title: 'Voucher Approved by Supervisor',
+          type: 'voucher_approval_step',
+          message: `Voucher ${voucher.title} (৳${voucher.amount.toLocaleString()}) approved by Supervisor (${supBy}) — waiting for Manager approval.`,
+          actorName: supBy,
+          actorEmail,
+        });
         alert('The voucher has been approved by Supervisor and is now pending Manager approval!');
       } else if (newStatus === 'waiting_accounts') {
+        await sendWorkflowNotification({
+          targetRole: 'accountant',
+          targetSection: 'voucher',
+          itemId: voucher.id,
+          stepStatus: 'waiting_accounts',
+          title: 'Voucher Approved by Manager',
+          type: 'voucher_approval_step',
+          message: `Voucher ${voucher.title} (৳${voucher.amount.toLocaleString()}) approved by Manager (${mgrBy}) — waiting for Accounts approval.`,
+          actorName: mgrBy,
+          actorEmail,
+        });
         alert('The voucher has been approved by Manager and is now pending Accounts approval!');
       } else {
+        await sendWorkflowNotification({
+          targetRole: 'supervisor',
+          targetSection: 'voucher',
+          itemId: voucher.id,
+          stepStatus: 'pending',
+          title: 'Voucher Sent for Review',
+          type: 'voucher_approval_step',
+          message: `Voucher ${voucher.title} (৳${voucher.amount.toLocaleString()}) sent back for Supervisor review by ${actorName}.`,
+          actorName,
+          actorEmail,
+        });
         alert('The voucher has been reset/moved back to review.');
       }
     } catch (err) {

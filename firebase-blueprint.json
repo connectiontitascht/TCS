@@ -2,14 +2,22 @@
   "entities": {
     "Notification": {
       "title": "Notification",
-      "description": "A notification for a user",
+      "description": "A real-time workflow or transaction notification targeted to a user or role",
       "type": "object",
       "properties": {
         "id": { "type": "string" },
         "userId": { "type": "string" },
-        "type": { "type": "string", "enum": ["new_transaction", "bill_payment", "budget_alert"] },
+        "targetRole": { "type": "string", "enum": ["admin", "supervisor", "manager", "accountant", "operator", "all"] },
+        "targetSection": { "type": "string", "enum": ["home_user", "voucher", "history", "reseller", "daily_closing"] },
+        "itemId": { "type": "string" },
+        "stepStatus": { "type": "string" },
+        "title": { "type": "string" },
+        "type": { "type": "string", "enum": ["new_transaction", "bill_payment", "budget_alert", "bill_approval_step", "voucher_approval_step"] },
         "message": { "type": "string" },
+        "actorName": { "type": "string" },
+        "actorEmail": { "type": "string" },
         "read": { "type": "boolean" },
+        "readBy": { "type": "array" },
         "createdAt": { "type": "string", "format": "date-time" }
       },
       "required": ["id", "userId", "type", "message", "read", "createdAt"]

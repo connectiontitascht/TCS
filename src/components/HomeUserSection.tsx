@@ -41,6 +41,7 @@ import { jsPDF } from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import * as XLSX from 'xlsx';
 import { PaymentMethodLogo } from './PaymentLogos';
+import { sendWorkflowNotification } from '../utils/notifications';
 
 // Helper to render beautiful English text for Billing YYYY-MM format
 const getEnglishMonthName = (monthStr: string) => {
@@ -80,7 +81,7 @@ const formatEnglishDateTime = (isoStr?: string | any) => {
 
 interface HomeUserSectionProps {
   userId: string;
-  onAddTransaction: (transaction: Omit<Transaction, 'id'>) => Promise<void>;
+  onAddTransaction: (transaction: Omit<Transaction, 'id'>, options?: { skipNotification?: boolean }) => Promise<void>;
   transactions: Transaction[];
   currentUserProfile?: AppUser | null;
 }
@@ -328,6 +329,68 @@ export function HomeUserSection({ userId, onAddTransaction, transactions, curren
       }
 
       await setDoc(docRef, updateData, { merge: true });
+
+      const bill = approvalModal.bill;
+      const cleanClientName = (bill.title || 'Subscriber')
+        .replace(/Home Subscriber Monthly Bill:\s*/gi, '')
+        .replace(/Home User Monthly Bill:\s*/gi, '')
+        .replace(/হোম ইউজার মাসিক বিল:\s*/g, '')
+        .replace(/[()]/g, '')
+        .trim();
+      const actorName = approverNameInput.trim() || currentUserProfile?.displayName || currentUserProfile?.email || 'Approver';
+      const actorEmail = currentUserProfile?.email;
+
+      if (approvalModal.targetStatus === 'pending_manager') {
+        await sendWorkflowNotification({
+          targetRole: 'manager',
+          targetSection: 'home_user',
+          itemId: bill.id,
+          stepStatus: 'pending_manager',
+          title: 'Bill Approved by Supervisor',
+          type: 'bill_approval_step',
+          message: `Home User Bill for ${cleanClientName} (৳${bill.amount.toLocaleString()}) approved by Supervisor (${actorName}) — waiting for Manager approval.`,
+          actorName,
+          actorEmail,
+        });
+      } else if (approvalModal.targetStatus === 'pending_accounts') {
+        await sendWorkflowNotification({
+          targetRole: 'accountant',
+          targetSection: 'home_user',
+          itemId: bill.id,
+          stepStatus: 'pending_accounts',
+          title: 'Bill Approved by Manager',
+          type: 'bill_approval_step',
+          message: `Home User Bill for ${cleanClientName} (৳${bill.amount.toLocaleString()}) approved by Manager (${actorName}) — waiting for Accounts approval.`,
+          actorName,
+          actorEmail,
+        });
+      } else if (approvalModal.targetStatus === 'approved') {
+        await sendWorkflowNotification({
+          targetRole: 'admin',
+          targetSection: 'home_user',
+          itemId: bill.id,
+          stepStatus: 'approved',
+          title: 'Bill Finally Approved',
+          type: 'bill_approval_step',
+          message: `Home User Bill for ${cleanClientName} (৳${bill.amount.toLocaleString()}) finally approved by Accounts (${actorName}).`,
+          actorName,
+          actorEmail,
+        });
+        if (bill.userId && bill.userId !== userId) {
+          await sendWorkflowNotification({
+            userId: bill.userId,
+            targetSection: 'home_user',
+            itemId: bill.id,
+            stepStatus: 'approved',
+            title: 'Your Bill Was Approved',
+            type: 'bill_approval_step',
+            message: `Home User Bill for ${cleanClientName} (৳${bill.amount.toLocaleString()}) has been finally approved by Accounts (${actorName}).`,
+            actorName,
+            actorEmail,
+          });
+        }
+      }
+
       alert(`The bill has been successfully approved as ${approvalModal.layerTitle}!`);
       setApprovalModal({
         isOpen: false,
@@ -495,7 +558,68 @@ export function HomeUserSection({ userId, onAddTransaction, transactions, curren
       }
 
       await setDoc(docRef, updateData, { merge: true });
-      
+
+      const targetBill = (transactions || []).find((t) => t.id === transactionId);
+      const cleanClientName = (targetBill?.title || 'Subscriber')
+        .replace(/Home Subscriber Monthly Bill:\s*/gi, '')
+        .replace(/Home User Monthly Bill:\s*/gi, '')
+        .replace(/হোম ইউজার মাসিক বিল:\s*/g, '')
+        .replace(/[()]/g, '')
+        .trim();
+      const amountStr = targetBill ? `৳${targetBill.amount.toLocaleString()}` : '';
+      const actorName = currentUserProfile?.displayName || currentUserProfile?.email || 'Authorized User';
+      const actorEmail = currentUserProfile?.email;
+
+      if (newStatus === 'pending_manager') {
+        await sendWorkflowNotification({
+          targetRole: 'manager',
+          targetSection: 'home_user',
+          itemId: transactionId,
+          stepStatus: 'pending_manager',
+          title: 'Bill Approved by Supervisor',
+          type: 'bill_approval_step',
+          message: `Home User Bill for ${cleanClientName}${amountStr ? ` (${amountStr})` : ''} approved by Supervisor (${actorName}) — waiting for Manager approval.`,
+          actorName,
+          actorEmail,
+        });
+      } else if (newStatus === 'pending_accounts') {
+        await sendWorkflowNotification({
+          targetRole: 'accountant',
+          targetSection: 'home_user',
+          itemId: transactionId,
+          stepStatus: 'pending_accounts',
+          title: 'Bill Approved by Manager',
+          type: 'bill_approval_step',
+          message: `Home User Bill for ${cleanClientName}${amountStr ? ` (${amountStr})` : ''} approved by Manager (${actorName}) — waiting for Accounts approval.`,
+          actorName,
+          actorEmail,
+        });
+      } else if (newStatus === 'approved') {
+        await sendWorkflowNotification({
+          targetRole: 'admin',
+          targetSection: 'home_user',
+          itemId: transactionId,
+          stepStatus: 'approved',
+          title: 'Bill Finally Approved',
+          type: 'bill_approval_step',
+          message: `Home User Bill for ${cleanClientName}${amountStr ? ` (${amountStr})` : ''} finally approved by Accounts (${actorName}).`,
+          actorName,
+          actorEmail,
+        });
+      } else if (newStatus === 'pending_supervisor') {
+        await sendWorkflowNotification({
+          targetRole: 'supervisor',
+          targetSection: 'home_user',
+          itemId: transactionId,
+          stepStatus: 'pending_supervisor',
+          title: 'Bill Sent for Review',
+          type: 'bill_approval_step',
+          message: `Home User Bill for ${cleanClientName}${amountStr ? ` (${amountStr})` : ''} sent back for Supervisor review by ${actorName}.`,
+          actorName,
+          actorEmail,
+        });
+      }
+
       let englishStatus = newStatus.replace('_', ' ');
       alert(`The bill status has been successfully updated to ${englishStatus}!`);
     } catch (err) {
@@ -532,6 +656,42 @@ export function HomeUserSection({ userId, onAddTransaction, transactions, curren
         rejectionReason: rejectionReasonInput.trim(),
         updatedAt: serverTimestamp(),
       }, { merge: true });
+
+      const rejectedBill = (transactions || []).find((t) => t.id === rejectingTxId);
+      const cleanClientName = (rejectedBill?.title || 'Subscriber')
+        .replace(/Home Subscriber Monthly Bill:\s*/gi, '')
+        .replace(/Home User Monthly Bill:\s*/gi, '')
+        .replace(/হোম ইউজার মাসিক বিল:\s*/g, '')
+        .replace(/[()]/g, '')
+        .trim();
+      const actorName = currentUserProfile?.displayName || currentUserProfile?.email || 'Approver';
+      const actorEmail = currentUserProfile?.email;
+
+      await sendWorkflowNotification({
+        targetRole: 'admin',
+        targetSection: 'home_user',
+        itemId: rejectingTxId,
+        stepStatus: 'rejected',
+        title: 'Bill Cancelled',
+        type: 'bill_approval_step',
+        message: `Home User Bill for ${cleanClientName}${rejectedBill ? ` (৳${rejectedBill.amount.toLocaleString()})` : ''} was cancelled by ${actorName}. Reason: ${rejectionReasonInput.trim()}`,
+        actorName,
+        actorEmail,
+      });
+
+      if (rejectedBill?.userId && rejectedBill.userId !== userId) {
+        await sendWorkflowNotification({
+          userId: rejectedBill.userId,
+          targetSection: 'home_user',
+          itemId: rejectingTxId,
+          stepStatus: 'rejected',
+          title: 'Your Bill Was Cancelled',
+          type: 'bill_approval_step',
+          message: `Home User Bill for ${cleanClientName}${rejectedBill ? ` (৳${rejectedBill.amount.toLocaleString()})` : ''} was cancelled by ${actorName}. Reason: ${rejectionReasonInput.trim()}`,
+          actorName,
+          actorEmail,
+        });
+      }
 
       alert('The bill has been successfully cancelled/rejected!');
       setIsRejectModalOpen(false);
@@ -749,7 +909,7 @@ export function HomeUserSection({ userId, onAddTransaction, transactions, curren
           collectorName: item.collector,
           receiverName: item.receiver,
           status: 'pending_supervisor' // Set status to pending for approval
-        });
+        }, { skipNotification: true });
         
         successCount++;
         setUploadedSuccessCount(successCount);
@@ -757,6 +917,20 @@ export function HomeUserSection({ userId, onAddTransaction, transactions, curren
       } catch (err) {
         console.error(`Failed uploading row ${i}`, err);
       }
+    }
+
+    if (successCount > 0) {
+      const actorName = currentUserProfile?.displayName || currentUserProfile?.email || 'Staff';
+      await sendWorkflowNotification({
+        targetRole: 'supervisor',
+        targetSection: 'home_user',
+        stepStatus: 'pending_supervisor',
+        title: 'Bulk Bills Awaiting Supervisor',
+        type: 'bill_approval_step',
+        message: `${successCount} Home User bill(s) bulk-uploaded by ${actorName} — waiting for Supervisor approval.`,
+        actorName,
+        actorEmail: currentUserProfile?.email,
+      });
     }
     
     setIsUploadingBulk(false);

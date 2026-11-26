@@ -284,15 +284,26 @@ export interface AppUser {
   createdAt: string;
 }
 
-export type NotificationType = 'new_transaction' | 'bill_payment' | 'budget_alert';
+export type NotificationType =
+  | 'new_transaction'
+  | 'bill_payment'
+  | 'budget_alert'
+  | 'bill_approval_step'
+  | 'voucher_approval_step';
 
 export interface Notification {
   id: string;
   userId: string;
   type: NotificationType;
+  targetRole?: UserRole | 'all';
+  targetSection?: 'home_user' | 'voucher' | 'history' | 'reseller' | 'daily_closing';
+  itemId?: string;
+  stepStatus?: string;
+  title?: string;
   message: string;
+  actorName?: string;
+  actorEmail?: string;
   read: boolean;
+  readBy?: string[];
   createdAt: string;
 }
-
-
