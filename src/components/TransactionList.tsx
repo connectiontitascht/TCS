@@ -28,6 +28,7 @@ import {
   EXPENSE_CATEGORY_LABELS
 } from '../types';
 import { PaymentMethodLogo } from './PaymentLogos';
+import { getPaymentMethodLabel } from '../utils/paymentMethods';
 
 interface TransactionListProps {
   transactions: Transaction[];
@@ -361,7 +362,7 @@ export function TransactionList({ transactions, onDeleteTransaction, onDeleteAll
                     const clientIdStr = isVoucher ? extractVoucherCreator(t) : (t.clientId || '-');
                     const collectorStr = isVoucher ? extractApproverName(t.notes) : (t.collectorName || t.receivedBy || '-');
                     const officeCollectorStr = isVoucher ? '-' : (t.receiverName || '-');
-                    const paymentMethodStr = t.paymentMethod || '-';
+                    const paymentMethodStr = t.paymentMethod ? getPaymentMethodLabel(t.paymentMethod, true) : '-';
                     
                     // formatDate local replacement
                     let localDateStr = t.date;
@@ -468,7 +469,7 @@ export function TransactionList({ transactions, onDeleteTransaction, onDeleteAll
 
     const receiptTitle = isInc ? `Receipt_${t.id}` : `Expense_Voucher_${t.id}`;
     
-    const payMethodEng = t.paymentMethod || 'Cash';
+    const payMethodEng = getPaymentMethodLabel(t.paymentMethod, true);
 
     const htmlContent = `
       <!DOCTYPE html>
@@ -630,7 +631,7 @@ export function TransactionList({ transactions, onDeleteTransaction, onDeleteAll
         `"${t.category}"`,
         t.amount,
         `"${(t.notes || '').replace(/"/g, '""')}"`,
-        `"${t.paymentMethod || ''}"`
+        `"${t.paymentMethod ? getPaymentMethodLabel(t.paymentMethod, true) : ''}"`
       ].join(','))
     ].join('\n');
 
@@ -1027,7 +1028,7 @@ export function TransactionList({ transactions, onDeleteTransaction, onDeleteAll
                 </tr>
                 ` : sortedTx.map(t => {
                   const isInc = t.type === 'income';
-                  const pMethod = t.paymentMethod ? ` [${t.paymentMethod}]` : '';
+                  const pMethod = t.paymentMethod ? ` [${getPaymentMethodLabel(t.paymentMethod, true)}]` : '';
                   return `
                 <tr>
                     <td style="text-align: center; color: #475569; font-weight: 500; font-family: sans-serif;">${t.date}</td>
@@ -1367,12 +1368,7 @@ export function TransactionList({ transactions, onDeleteTransaction, onDeleteAll
                       {t.paymentMethod ? (
                         <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-[10px] font-bold bg-slate-100 text-slate-600 border border-slate-200/50">
                           <PaymentMethodLogo method={t.paymentMethod} className="w-3.5 h-3.5" />
-                          {t.paymentMethod === 'Cash' ? 'Cash' :
-                           t.paymentMethod === 'bKash' ? 'bKash' :
-                           t.paymentMethod === 'Nagad' ? 'Nagad' :
-                           t.paymentMethod === 'Rocket' ? 'Rocket' :
-                           t.paymentMethod === 'Bank' ? 'Bank' : 
-                           t.paymentMethod === 'SSLCommerz' ? 'SSLCommerz' : t.paymentMethod}
+                          {getPaymentMethodLabel(t.paymentMethod, true)}
                         </span>
                       ) : (
                         <span className="text-slate-400">-</span>

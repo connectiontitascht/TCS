@@ -19,6 +19,7 @@ import {
   Search,
   X
 } from 'lucide-react';
+import { getPaymentMethodLabel } from '../utils/paymentMethods';
 import { 
   collection, 
   doc, 
@@ -2454,12 +2455,13 @@ export function VoucherSection({ userId, onAddTransaction, currentUserProfile }:
                   onChange={(e) => setPaymentMethod(e.target.value)}
                   className="w-full px-3.5 py-2.5 border border-slate-200 rounded-xl focus:outline-none focus:ring-1 focus:ring-indigo-500 text-slate-800 text-xs font-semibold bg-white cursor-pointer"
                 >
-                  <option value="Cash">Cash</option>
-                  <option value="bKash">bKash</option>
-                  <option value="Nagad">Nagad</option>
-                  <option value="Rocket">Rocket</option>
-                  <option value="Bank Transfer">Bank Transfer</option>
-                  <option value="SSLCommerz">SSLCommerz</option>
+                  <option value="Cash">💵 Cash</option>
+                  <option value="bKash Merchant">📱 bKash Merchant</option>
+                  <option value="Nagad Merchant">📱 Nagad Merchant</option>
+                  <option value="bKash (P)">📱 bKash (P)</option>
+                  <option value="Nagad (P)">📱 Nagad (P)</option>
+                  <option value="Bank">🏦 Bank</option>
+                  <option value="SSL Commerz">💳 SSL Commerz</option>
                 </select>
               </div>
             </div>
@@ -2764,7 +2766,7 @@ export function VoucherSection({ userId, onAddTransaction, currentUserProfile }:
                           <td className="py-3.5 px-3 whitespace-nowrap">
                             <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-[10px] font-bold bg-slate-100 text-slate-600 border border-slate-200/50">
                               <PaymentMethodLogo method={voucher.paymentMethod} className="w-3.5 h-3.5" />
-                              <span>{voucher.paymentMethod || 'Cash'}</span>
+                              <span>{getPaymentMethodLabel(voucher.paymentMethod, true)}</span>
                             </span>
                           </td>
 

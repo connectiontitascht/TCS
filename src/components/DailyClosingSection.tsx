@@ -39,6 +39,7 @@ import {
 import { db, handleFirestoreError, OperationType } from '../firebase';
 import { Transaction, DailyClosing, ExpenseCategory, EXPENSE_CATEGORY_LABELS, AppUser } from '../types';
 import { PaymentMethodLogo } from './PaymentLogos';
+import { normalizePaymentMethodKey, getPaymentMethodLabel, PaymentMethodKey } from '../utils/paymentMethods';
 import { jsPDF } from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import * as XLSX from 'xlsx';
@@ -57,11 +58,16 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile, 
   const [activeEntryModal, setActiveEntryModal] = useState<'income' | 'expense' | 'cash_details' | 'month_closing' | null>(null);
   const [selectedDate, setSelectedDate] = useState<string>(() => {
     const today = new Date();
-    return today.toISOString().split('T')[0];
+    const yyyy = today.getFullYear();
+    const mm = String(today.getMonth() + 1).padStart(2, '0');
+    const dd = String(today.getDate()).padStart(2, '0');
+    return `${yyyy}-${mm}-${dd}`;
   });
   const [closingMonth, setClosingMonth] = useState<string>(() => {
     const today = new Date();
-    return today.toISOString().slice(0, 7);
+    const yyyy = today.getFullYear();
+    const mm = String(today.getMonth() + 1).padStart(2, '0');
+    return `${yyyy}-${mm}`;
   });
   const [monthlyDues, setMonthlyDues] = useState<
     Record<string, { dueAmount: number; notes?: string; discountAmount?: number; discountNotes?: string; updatedBy?: string }>
@@ -80,6 +86,7 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile, 
   const [openingBkash, setOpeningBkash] = useState<string>('0');
   const [openingNagad, setOpeningNagad] = useState<string>('0');
   const [openingRocket, setOpeningRocket] = useState<string>('0');
+  const [openingNagadP, setOpeningNagadP] = useState<string>('0');
   const [openingBank, setOpeningBank] = useState<string>('0');
   const [openingSsl, setOpeningSsl] = useState<string>('0');
 
@@ -326,11 +333,12 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile, 
   // Uses the latest closed DailyClosing strictly before targetDate as an anchor (if any),
   // then adds net Daily Closing transactions (income - expense) for all dates strictly between anchorDate and targetDate.
   const computeOpeningBalancesForDate = (targetDate: string) => {
-    const balances = {
+    const balances: Record<PaymentMethodKey, number> = {
       cash: 0,
       bkash: 0,
       nagad: 0,
-      rocket: 0,
+      bkash_p: 0,
+      nagad_p: 0,
       bank: 0,
       sslcommerz: 0,
     };
@@ -348,7 +356,8 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile, 
       balances.cash = Number(lastClosed.closingCash ?? 0);
       balances.bkash = Number(lastClosed.closingBkash ?? 0);
       balances.nagad = Number(lastClosed.closingNagad ?? 0);
-      balances.rocket = Number(lastClosed.closingRocket ?? 0);
+      balances.bkash_p = Number(lastClosed.closingBkashP ?? lastClosed.closingRocket ?? 0);
+      balances.nagad_p = Number(lastClosed.closingNagadP ?? 0);
       balances.bank = Number(lastClosed.closingBank ?? 0);
       balances.sslcommerz = Number(lastClosed.closingSsl ?? 0);
     }
@@ -357,116 +366,193 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile, 
       if (!t.date || t.date >= targetDate) continue;
       if (anchorDate && t.date <= anchorDate) continue;
 
-      const pm = (t.paymentMethod || 'cash').trim().toLowerCase();
+      const key = normalizePaymentMethodKey(t.paymentMethod);
       const amount = Number(t.amount) || 0;
       const delta = t.type === 'income' ? amount : -amount;
-
-      if (pm === 'cash' || !t.paymentMethod) {
-        balances.cash += delta;
-      } else if (pm === 'bkash') {
-        balances.bkash += delta;
-      } else if (pm === 'nagad') {
-        balances.nagad += delta;
-      } else if (pm === 'rocket') {
-        balances.rocket += delta;
-      } else if (pm === 'bank') {
-        balances.bank += delta;
-      } else if (pm === 'sslcommerz') {
-        balances.sslcommerz += delta;
-      }
+      balances[key] += delta;
     }
 
     return balances;
   };
 
+  const hasPhysicalDrawerBalances = (c: DailyClosing): boolean =>
+    [
+      c.khaOpeningCash, c.khaTodayCash, c.khaOfficeCash,
+      c.dhakaOpeningCash, c.dhakaTodayCash, c.dhakaOfficeCash,
+      c.nayanOpeningCash, c.nayanTodayCash, c.nayanCash,
+      c.accountOpeningCash, c.accountTodayCash, c.accountCash,
+    ].some((v) => Number(v || 0) !== 0);
+
+  const hasTransferDrawerBalances = (c: DailyClosing): boolean =>
+    [
+      c.transferKhaDhakaOpening, c.transferKhaDhakaToday, c.transferKhaDhakaTotal, c.transferKhaToNayan,
+      c.transferDhakaKhaOpening, c.transferDhakaKhaToday, c.transferDhakaKhaTotal, c.transferNayanToDhaka,
+      c.transferBkashAccountOpening, c.transferBkashAccountToday, c.transferBkashAccountTotal, c.transferDhakaToNayan,
+      c.transferAccountDhakaOpening, c.transferAccountDhakaToday, c.transferAccountDhakaTotal, c.transferDhakaToKha,
+    ].some((v) => Number(v || 0) !== 0);
+
+  const hasDrawerBalances = (c: DailyClosing): boolean =>
+    hasPhysicalDrawerBalances(c) || hasTransferDrawerBalances(c);
+
+  const hasPhysicalOpeningBalances = (c: DailyClosing): boolean =>
+    [c.khaOpeningCash, c.dhakaOpeningCash, c.nayanOpeningCash, c.accountOpeningCash].some(
+      (v) => Number(v || 0) !== 0
+    );
+
+  const hasTransferOpeningBalances = (c: DailyClosing): boolean =>
+    [
+      c.transferKhaDhakaOpening,
+      c.transferDhakaKhaOpening,
+      c.transferBkashAccountOpening,
+      c.transferAccountDhakaOpening,
+    ].some((v) => Number(v || 0) !== 0);
+
   // Helper: compute prior drawer (Cash Summary & Transfer Money) Total Amounts for targetDate.
-  // The Total Amount from the most recent closing before targetDate automatically carries forward
-  // to become the Opening Balance for targetDate.
+  // Walks chronologically before targetDate so empty/0-only records never wipe out prior balances.
   const getPriorDrawerTotals = (targetDate: string) => {
-    if (!targetDate) {
-      return {
-        khaOpening: 0,
-        dhakaOpening: 0,
-        nayanOpening: 0,
-        accountOpening: 0,
-        transfer1Opening: 0,
-        transfer2Opening: 0,
-        transfer3Opening: 0,
-        transfer4Opening: 0,
-      };
-    }
+    const empty = {
+      khaOpening: 0,
+      dhakaOpening: 0,
+      nayanOpening: 0,
+      accountOpening: 0,
+      transfer1Opening: 0,
+      transfer2Opening: 0,
+      transfer3Opening: 0,
+      transfer4Opening: 0,
+    };
+    if (!targetDate) return empty;
 
-    const priorClosings = closings
-      .filter((c) => {
-        if (!c.date || c.date >= targetDate) return false;
-        return (
-          c.isDrawerSubmitted ||
-          c.status === 'closed' ||
-          c.khaOpeningCash !== undefined ||
-          c.transferKhaDhakaOpening !== undefined ||
-          (c.khaOfficeCash ?? 0) > 0 ||
-          (c.dhakaOfficeCash ?? 0) > 0 ||
-          (c.nayanCash ?? 0) > 0 ||
-          (c.accountCash ?? 0) > 0 ||
-          (c.transferKhaToNayan ?? 0) > 0 ||
-          (c.transferNayanToDhaka ?? 0) > 0 ||
-          (c.transferDhakaToNayan ?? 0) > 0 ||
-          (c.transferDhakaToKha ?? 0) > 0
-        );
-      })
-      .sort((a, b) => b.date.localeCompare(a.date));
+    const sortedPrior = closings
+      .filter((c) => c.date && c.date < targetDate)
+      .sort((a, b) => a.date.localeCompare(b.date));
 
-    if (priorClosings.length === 0) {
-      return {
-        khaOpening: 0,
-        dhakaOpening: 0,
-        nayanOpening: 0,
-        accountOpening: 0,
-        transfer1Opening: 0,
-        transfer2Opening: 0,
-        transfer3Opening: 0,
-        transfer4Opening: 0,
-      };
-    }
-
-    const p = priorClosings[0];
-    const calcTotal = (
-      totalField: number | undefined,
-      openField: number | undefined,
-      todayField: number | undefined
-    ) => {
-      if (totalField !== undefined && totalField !== null && !isNaN(totalField)) {
-        return Number(totalField);
-      }
-      return (Number(openField) || 0) + (Number(todayField) || 0);
+    const running = {
+      kha: 0,
+      dhaka: 0,
+      nayan: 0,
+      account: 0,
+      t1: 0,
+      t2: 0,
+      t3: 0,
+      t4: 0,
     };
 
-    return {
-      khaOpening: calcTotal(p.khaOfficeCash, p.khaOpeningCash, p.khaTodayCash),
-      dhakaOpening: calcTotal(p.dhakaOfficeCash, p.dhakaOpeningCash, p.dhakaTodayCash),
-      nayanOpening: calcTotal(p.nayanCash, p.nayanOpeningCash, p.nayanTodayCash),
-      accountOpening: calcTotal(p.accountCash, p.accountOpeningCash, p.accountTodayCash),
+    for (const c of sortedPrior) {
+      if (hasPhysicalDrawerBalances(c)) {
+        const hasOpen = hasPhysicalOpeningBalances(c);
+        const khaOpen = hasOpen ? Number(c.khaOpeningCash ?? 0) : running.kha;
+        const dhakaOpen = hasOpen ? Number(c.dhakaOpeningCash ?? 0) : running.dhaka;
+        const nayanOpen = hasOpen ? Number(c.nayanOpeningCash ?? 0) : running.nayan;
+        const accOpen = hasOpen ? Number(c.accountOpeningCash ?? 0) : running.account;
 
-      transfer1Opening: calcTotal(
-        p.transferKhaDhakaTotal ?? p.transferKhaToNayan,
-        p.transferKhaDhakaOpening,
-        p.transferKhaDhakaToday
-      ),
-      transfer2Opening: calcTotal(
-        p.transferDhakaKhaTotal ?? p.transferNayanToDhaka,
-        p.transferDhakaKhaOpening,
-        p.transferDhakaKhaToday
-      ),
-      transfer3Opening: calcTotal(
-        p.transferBkashAccountTotal ?? p.transferDhakaToNayan,
-        p.transferBkashAccountOpening,
-        p.transferBkashAccountToday
-      ),
-      transfer4Opening: calcTotal(
-        p.transferAccountDhakaTotal ?? p.transferDhakaToKha,
-        p.transferAccountDhakaOpening,
-        p.transferAccountDhakaToday
-      ),
+        const khaToday = Number(c.khaTodayCash ?? (c.khaOpeningCash === undefined ? c.khaOfficeCash ?? 0 : 0));
+        const dhakaToday = Number(c.dhakaTodayCash ?? (c.dhakaOpeningCash === undefined ? c.dhakaOfficeCash ?? 0 : 0));
+        const nayanToday = Number(c.nayanTodayCash ?? (c.nayanOpeningCash === undefined ? c.nayanCash ?? 0 : 0));
+        const accToday = Number(c.accountTodayCash ?? (c.accountOpeningCash === undefined ? c.accountCash ?? 0 : 0));
+
+        running.kha = hasOpen && c.khaOfficeCash !== undefined && c.khaOfficeCash !== null ? Number(c.khaOfficeCash) : khaOpen + khaToday;
+        running.dhaka = hasOpen && c.dhakaOfficeCash !== undefined && c.dhakaOfficeCash !== null ? Number(c.dhakaOfficeCash) : dhakaOpen + dhakaToday;
+        running.nayan = hasOpen && c.nayanCash !== undefined && c.nayanCash !== null ? Number(c.nayanCash) : nayanOpen + nayanToday;
+        running.account = hasOpen && c.accountCash !== undefined && c.accountCash !== null ? Number(c.accountCash) : accOpen + accToday;
+      }
+
+      if (hasTransferDrawerBalances(c)) {
+        const hasOpen = hasTransferOpeningBalances(c);
+        const t1Open = hasOpen ? Number(c.transferKhaDhakaOpening ?? 0) : running.t1;
+        const t2Open = hasOpen ? Number(c.transferDhakaKhaOpening ?? 0) : running.t2;
+        const t3Open = hasOpen ? Number(c.transferBkashAccountOpening ?? 0) : running.t3;
+        const t4Open = hasOpen ? Number(c.transferAccountDhakaOpening ?? 0) : running.t4;
+
+        const t1Today = Number(c.transferKhaDhakaToday ?? (c.transferKhaDhakaOpening === undefined ? c.transferKhaToNayan ?? 0 : 0));
+        const t2Today = Number(c.transferDhakaKhaToday ?? (c.transferDhakaKhaOpening === undefined ? c.transferNayanToDhaka ?? 0 : 0));
+        const t3Today = Number(c.transferBkashAccountToday ?? (c.transferBkashAccountOpening === undefined ? c.transferDhakaToNayan ?? 0 : 0));
+        const t4Today = Number(c.transferAccountDhakaToday ?? (c.transferAccountDhakaOpening === undefined ? c.transferDhakaToKha ?? 0 : 0));
+
+        const t1SavedTotal = c.transferKhaDhakaTotal ?? c.transferKhaToNayan;
+        const t2SavedTotal = c.transferDhakaKhaTotal ?? c.transferNayanToDhaka;
+        const t3SavedTotal = c.transferBkashAccountTotal ?? c.transferDhakaToNayan;
+        const t4SavedTotal = c.transferAccountDhakaTotal ?? c.transferDhakaToKha;
+
+        running.t1 = hasOpen && t1SavedTotal !== undefined && t1SavedTotal !== null ? Number(t1SavedTotal) : t1Open + t1Today;
+        running.t2 = hasOpen && t2SavedTotal !== undefined && t2SavedTotal !== null ? Number(t2SavedTotal) : t2Open + t2Today;
+        running.t3 = hasOpen && t3SavedTotal !== undefined && t3SavedTotal !== null ? Number(t3SavedTotal) : t3Open + t3Today;
+        running.t4 = hasOpen && t4SavedTotal !== undefined && t4SavedTotal !== null ? Number(t4SavedTotal) : t4Open + t4Today;
+      }
+    }
+
+    return {
+      khaOpening: running.kha,
+      dhakaOpening: running.dhaka,
+      nayanOpening: running.nayan,
+      accountOpening: running.account,
+      transfer1Opening: running.t1,
+      transfer2Opening: running.t2,
+      transfer3Opening: running.t3,
+      transfer4Opening: running.t4,
+    };
+  };
+
+  // Helper: ensure any DailyClosing record has carried-forward Opening/Total when saved with 0 opening balances
+  const resolveClosingDrawer = (dc: DailyClosing): DailyClosing => {
+    const prior = getPriorDrawerTotals(dc.date);
+    const hasPhysOpen = hasPhysicalOpeningBalances(dc);
+    const hasPriorPhys =
+      prior.khaOpening + prior.dhakaOpening + prior.nayanOpening + prior.accountOpening !== 0;
+
+    const khaOpen = !hasPhysOpen && hasPriorPhys ? prior.khaOpening : Number(dc.khaOpeningCash ?? 0);
+    const dhakaOpen = !hasPhysOpen && hasPriorPhys ? prior.dhakaOpening : Number(dc.dhakaOpeningCash ?? 0);
+    const nayanOpen = !hasPhysOpen && hasPriorPhys ? prior.nayanOpening : Number(dc.nayanOpeningCash ?? 0);
+    const accOpen = !hasPhysOpen && hasPriorPhys ? prior.accountOpening : Number(dc.accountOpeningCash ?? 0);
+
+    const khaToday = Number(dc.khaTodayCash ?? (dc.khaOpeningCash === undefined ? dc.khaOfficeCash ?? 0 : 0));
+    const dhakaToday = Number(dc.dhakaTodayCash ?? (dc.dhakaOpeningCash === undefined ? dc.dhakaOfficeCash ?? 0 : 0));
+    const nayanToday = Number(dc.nayanTodayCash ?? (dc.nayanOpeningCash === undefined ? dc.nayanCash ?? 0 : 0));
+    const accToday = Number(dc.accountTodayCash ?? (dc.accountOpeningCash === undefined ? dc.accountCash ?? 0 : 0));
+
+    const hasTransOpen = hasTransferOpeningBalances(dc);
+    const hasPriorTrans =
+      prior.transfer1Opening + prior.transfer2Opening + prior.transfer3Opening + prior.transfer4Opening !== 0;
+
+    const t1Open = !hasTransOpen && hasPriorTrans ? prior.transfer1Opening : Number(dc.transferKhaDhakaOpening ?? 0);
+    const t2Open = !hasTransOpen && hasPriorTrans ? prior.transfer2Opening : Number(dc.transferDhakaKhaOpening ?? 0);
+    const t3Open = !hasTransOpen && hasPriorTrans ? prior.transfer3Opening : Number(dc.transferBkashAccountOpening ?? 0);
+    const t4Open = !hasTransOpen && hasPriorTrans ? prior.transfer4Opening : Number(dc.transferAccountDhakaOpening ?? 0);
+
+    const t1Today = Number(dc.transferKhaDhakaToday ?? (dc.transferKhaDhakaOpening === undefined ? dc.transferKhaToNayan ?? 0 : 0));
+    const t2Today = Number(dc.transferDhakaKhaToday ?? (dc.transferDhakaKhaOpening === undefined ? dc.transferNayanToDhaka ?? 0 : 0));
+    const t3Today = Number(dc.transferBkashAccountToday ?? (dc.transferBkashAccountOpening === undefined ? dc.transferDhakaToNayan ?? 0 : 0));
+    const t4Today = Number(dc.transferAccountDhakaToday ?? (dc.transferAccountDhakaOpening === undefined ? dc.transferDhakaToKha ?? 0 : 0));
+
+    return {
+      ...dc,
+      khaOpeningCash: khaOpen,
+      khaTodayCash: khaToday,
+      khaOfficeCash: !hasPhysOpen && hasPriorPhys ? khaOpen + khaToday : Number(dc.khaOfficeCash ?? khaOpen + khaToday),
+      dhakaOpeningCash: dhakaOpen,
+      dhakaTodayCash: dhakaToday,
+      dhakaOfficeCash: !hasPhysOpen && hasPriorPhys ? dhakaOpen + dhakaToday : Number(dc.dhakaOfficeCash ?? dhakaOpen + dhakaToday),
+      nayanOpeningCash: nayanOpen,
+      nayanTodayCash: nayanToday,
+      nayanCash: !hasPhysOpen && hasPriorPhys ? nayanOpen + nayanToday : Number(dc.nayanCash ?? nayanOpen + nayanToday),
+      accountOpeningCash: accOpen,
+      accountTodayCash: accToday,
+      accountCash: !hasPhysOpen && hasPriorPhys ? accOpen + accToday : Number(dc.accountCash ?? accOpen + accToday),
+
+      transferKhaDhakaOpening: t1Open,
+      transferKhaDhakaToday: t1Today,
+      transferKhaToNayan: !hasTransOpen && hasPriorTrans ? t1Open + t1Today : Number(dc.transferKhaToNayan ?? t1Open + t1Today),
+
+      transferDhakaKhaOpening: t2Open,
+      transferDhakaKhaToday: t2Today,
+      transferNayanToDhaka: !hasTransOpen && hasPriorTrans ? t2Open + t2Today : Number(dc.transferNayanToDhaka ?? t2Open + t2Today),
+
+      transferBkashAccountOpening: t3Open,
+      transferBkashAccountToday: t3Today,
+      transferDhakaToNayan: !hasTransOpen && hasPriorTrans ? t3Open + t3Today : Number(dc.transferDhakaToNayan ?? t3Open + t3Today),
+
+      transferAccountDhakaOpening: t4Open,
+      transferAccountDhakaToday: t4Today,
+      transferDhakaToKha: !hasTransOpen && hasPriorTrans ? t4Open + t4Today : Number(dc.transferDhakaToKha ?? t4Open + t4Today),
     };
   };
 
@@ -530,24 +616,19 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile, 
       (t) => t.date && t.date.startsWith(safeMonth)
     );
 
-    const flows = {
+    const flows: Record<PaymentMethodKey, { income: number; expense: number }> = {
       cash: { income: 0, expense: 0 },
       bkash: { income: 0, expense: 0 },
       nagad: { income: 0, expense: 0 },
-      rocket: { income: 0, expense: 0 },
+      bkash_p: { income: 0, expense: 0 },
+      nagad_p: { income: 0, expense: 0 },
       bank: { income: 0, expense: 0 },
       sslcommerz: { income: 0, expense: 0 },
     };
 
     for (const t of monthTxs) {
-      const pm = (t.paymentMethod || 'cash').trim().toLowerCase();
       const amt = Number(t.amount) || 0;
-      const key: keyof typeof flows =
-        pm === 'bkash' ? 'bkash' :
-        pm === 'nagad' ? 'nagad' :
-        pm === 'rocket' ? 'rocket' :
-        pm === 'bank' ? 'bank' :
-        pm === 'sslcommerz' ? 'sslcommerz' : 'cash';
+      const key = normalizePaymentMethodKey(t.paymentMethod);
 
       if (t.type === 'income') {
         flows[key].income += amt;
@@ -558,10 +639,11 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile, 
 
     const methods = [
       { key: 'cash', label: 'Cash', open: openBal.cash, income: flows.cash.income, expense: flows.cash.expense, close: openBal.cash + flows.cash.income - flows.cash.expense, pl: flows.cash.income - flows.cash.expense },
-      { key: 'bkash', label: 'bKash', open: openBal.bkash, income: flows.bkash.income, expense: flows.bkash.expense, close: openBal.bkash + flows.bkash.income - flows.bkash.expense, pl: flows.bkash.income - flows.bkash.expense },
-      { key: 'nagad', label: 'Nagad', open: openBal.nagad, income: flows.nagad.income, expense: flows.nagad.expense, close: openBal.nagad + flows.nagad.income - flows.nagad.expense, pl: flows.nagad.income - flows.nagad.expense },
-      { key: 'rocket', label: 'Rocket', open: openBal.rocket, income: flows.rocket.income, expense: flows.rocket.expense, close: openBal.rocket + flows.rocket.income - flows.rocket.expense, pl: flows.rocket.income - flows.rocket.expense },
-      { key: 'bank', label: 'Bank Transfer', open: openBal.bank, income: flows.bank.income, expense: flows.bank.expense, close: openBal.bank + flows.bank.income - flows.bank.expense, pl: flows.bank.income - flows.bank.expense },
+      { key: 'bkash', label: 'bKash Merchant', open: openBal.bkash, income: flows.bkash.income, expense: flows.bkash.expense, close: openBal.bkash + flows.bkash.income - flows.bkash.expense, pl: flows.bkash.income - flows.bkash.expense },
+      { key: 'nagad', label: 'Nagad Merchant', open: openBal.nagad, income: flows.nagad.income, expense: flows.nagad.expense, close: openBal.nagad + flows.nagad.income - flows.nagad.expense, pl: flows.nagad.income - flows.nagad.expense },
+      { key: 'bkash_p', label: 'bKash (P)', open: openBal.bkash_p, income: flows.bkash_p.income, expense: flows.bkash_p.expense, close: openBal.bkash_p + flows.bkash_p.income - flows.bkash_p.expense, pl: flows.bkash_p.income - flows.bkash_p.expense },
+      { key: 'nagad_p', label: 'Nagad (P)', open: openBal.nagad_p, income: flows.nagad_p.income, expense: flows.nagad_p.expense, close: openBal.nagad_p + flows.nagad_p.income - flows.nagad_p.expense, pl: flows.nagad_p.income - flows.nagad_p.expense },
+      { key: 'bank', label: 'Bank', open: openBal.bank, income: flows.bank.income, expense: flows.bank.expense, close: openBal.bank + flows.bank.income - flows.bank.expense, pl: flows.bank.income - flows.bank.expense },
       { key: 'sslcommerz', label: 'SSL Commerz', open: openBal.sslcommerz, income: flows.sslcommerz.income, expense: flows.sslcommerz.expense, close: openBal.sslcommerz + flows.sslcommerz.income - flows.sslcommerz.expense, pl: flows.sslcommerz.income - flows.sslcommerz.expense },
     ];
 
@@ -575,23 +657,53 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile, 
       .filter((c) => c.date && c.date.startsWith(safeMonth))
       .sort((a, b) => b.date.localeCompare(a.date));
     const closedDaysCount = monthClosings.filter((c) => c.status === 'closed').length;
-    const latestDrawerDoc = monthClosings.find((c) => c.isDrawerSubmitted || c.status === 'closed') || null;
+    const rawLatestDrawerDoc =
+      monthClosings.find((c) => (c.isDrawerSubmitted || c.status === 'closed') && hasDrawerBalances(c)) ||
+      monthClosings.find((c) => hasDrawerBalances(c)) ||
+      null;
+    const latestDrawerDoc = rawLatestDrawerDoc ? resolveClosingDrawer(rawLatestDrawerDoc) : null;
+    const [yrNum, moNum] = safeMonth.split('-').map((v) => parseInt(v, 10));
+    const nextMonthFirstDay =
+      !isNaN(yrNum) && !isNaN(moNum) && moNum >= 1 && moNum <= 12
+        ? `${moNum === 12 ? yrNum + 1 : yrNum}-${String(moNum === 12 ? 1 : moNum + 1).padStart(2, '0')}-01`
+        : `${safeMonth}-32`;
 
-    const totalTransferKhaDhakaOpening = monthClosings.reduce((s, c) => s + (c.transferKhaDhakaOpening ?? 0), 0);
-    const totalTransferKhaDhakaToday = monthClosings.reduce((s, c) => s + (c.transferKhaDhakaToday ?? (c.transferKhaDhakaOpening === undefined ? c.transferKhaToNayan ?? 0 : 0)), 0);
-    const totalTransferKhaToNayan = monthClosings.reduce((s, c) => s + (c.transferKhaToNayan ?? 0), 0);
+    // Previous month's closing balance = Opening balance for safeMonth
+    const prevMonthTotals = getPriorDrawerTotals(`${safeMonth}-01`);
+    // End of safeMonth's closing balance = Total balance at end of safeMonth
+    const endOfMonthTotals = getPriorDrawerTotals(nextMonthFirstDay);
 
-    const totalTransferDhakaKhaOpening = monthClosings.reduce((s, c) => s + (c.transferDhakaKhaOpening ?? 0), 0);
-    const totalTransferDhakaKhaToday = monthClosings.reduce((s, c) => s + (c.transferDhakaKhaToday ?? (c.transferDhakaKhaOpening === undefined ? c.transferNayanToDhaka ?? 0 : 0)), 0);
-    const totalTransferNayanToDhaka = monthClosings.reduce((s, c) => s + (c.transferNayanToDhaka ?? 0), 0);
+    const khaOpen = prevMonthTotals.khaOpening;
+    const khaClose = endOfMonthTotals.khaOpening;
+    const khaMonth = khaClose - khaOpen;
 
-    const totalTransferBkashAccountOpening = monthClosings.reduce((s, c) => s + (c.transferBkashAccountOpening ?? 0), 0);
-    const totalTransferBkashAccountToday = monthClosings.reduce((s, c) => s + (c.transferBkashAccountToday ?? (c.transferBkashAccountOpening === undefined ? c.transferDhakaToNayan ?? 0 : 0)), 0);
-    const totalTransferDhakaToNayan = monthClosings.reduce((s, c) => s + (c.transferDhakaToNayan ?? 0), 0);
+    const dhakaOpen = prevMonthTotals.dhakaOpening;
+    const dhakaClose = endOfMonthTotals.dhakaOpening;
+    const dhakaMonth = dhakaClose - dhakaOpen;
 
-    const totalTransferAccountDhakaOpening = monthClosings.reduce((s, c) => s + (c.transferAccountDhakaOpening ?? 0), 0);
-    const totalTransferAccountDhakaToday = monthClosings.reduce((s, c) => s + (c.transferAccountDhakaToday ?? (c.transferAccountDhakaOpening === undefined ? c.transferDhakaToKha ?? 0 : 0)), 0);
-    const totalTransferDhakaToKha = monthClosings.reduce((s, c) => s + (c.transferDhakaToKha ?? 0), 0);
+    const nayanOpen = prevMonthTotals.nayanOpening;
+    const nayanClose = endOfMonthTotals.nayanOpening;
+    const nayanMonth = nayanClose - nayanOpen;
+
+    const accOpen = prevMonthTotals.accountOpening;
+    const accClose = endOfMonthTotals.accountOpening;
+    const accMonth = accClose - accOpen;
+
+    const t1Open = prevMonthTotals.transfer1Opening;
+    const t1Close = endOfMonthTotals.transfer1Opening;
+    const t1Month = t1Close - t1Open;
+
+    const t2Open = prevMonthTotals.transfer2Opening;
+    const t2Close = endOfMonthTotals.transfer2Opening;
+    const t2Month = t2Close - t2Open;
+
+    const t3Open = prevMonthTotals.transfer3Opening;
+    const t3Close = endOfMonthTotals.transfer3Opening;
+    const t3Month = t3Close - t3Open;
+
+    const t4Open = prevMonthTotals.transfer4Opening;
+    const t4Close = endOfMonthTotals.transfer4Opening;
+    const t4Month = t4Close - t4Open;
 
     const { incomeCategories, expenseCategories } = computeCategoryBreakdown(monthTxs);
 
@@ -623,56 +735,47 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile, 
       discountNotes: monthlyDues[safeMonth]?.discountNotes || '',
       closedDaysCount,
       latestDrawerDoc,
-      physicalCash: latestDrawerDoc ? {
-        khaOpening: latestDrawerDoc.khaOpeningCash ?? 0,
-        khaToday: latestDrawerDoc.khaTodayCash ?? (latestDrawerDoc.khaOpeningCash === undefined ? latestDrawerDoc.khaOfficeCash ?? 0 : 0),
-        khaTotal: latestDrawerDoc.khaOfficeCash ?? 0,
+      physicalCash: {
+        khaOpening: khaOpen,
+        khaToday: khaMonth,
+        khaTotal: khaClose,
 
-        dhakaOpening: latestDrawerDoc.dhakaOpeningCash ?? 0,
-        dhakaToday: latestDrawerDoc.dhakaTodayCash ?? (latestDrawerDoc.dhakaOpeningCash === undefined ? latestDrawerDoc.dhakaOfficeCash ?? 0 : 0),
-        dhakaTotal: latestDrawerDoc.dhakaOfficeCash ?? 0,
+        dhakaOpening: dhakaOpen,
+        dhakaToday: dhakaMonth,
+        dhakaTotal: dhakaClose,
 
-        nayanOpening: latestDrawerDoc.nayanOpeningCash ?? 0,
-        nayanToday: latestDrawerDoc.nayanTodayCash ?? (latestDrawerDoc.nayanOpeningCash === undefined ? latestDrawerDoc.nayanCash ?? 0 : 0),
-        nayanTotal: latestDrawerDoc.nayanCash ?? 0,
+        nayanOpening: nayanOpen,
+        nayanToday: nayanMonth,
+        nayanTotal: nayanClose,
 
-        accountOpening: latestDrawerDoc.accountOpeningCash ?? 0,
-        accountToday: latestDrawerDoc.accountTodayCash ?? (latestDrawerDoc.accountOpeningCash === undefined ? latestDrawerDoc.accountCash ?? 0 : 0),
-        accountTotal: latestDrawerDoc.accountCash ?? 0,
+        accountOpening: accOpen,
+        accountToday: accMonth,
+        accountTotal: accClose,
 
-        totalOpening: (latestDrawerDoc.khaOpeningCash ?? 0) + (latestDrawerDoc.dhakaOpeningCash ?? 0) + (latestDrawerDoc.nayanOpeningCash ?? 0) + (latestDrawerDoc.accountOpeningCash ?? 0),
-        totalToday: (latestDrawerDoc.khaTodayCash ?? (latestDrawerDoc.khaOpeningCash === undefined ? latestDrawerDoc.khaOfficeCash ?? 0 : 0)) +
-                    (latestDrawerDoc.dhakaTodayCash ?? (latestDrawerDoc.dhakaOpeningCash === undefined ? latestDrawerDoc.dhakaOfficeCash ?? 0 : 0)) +
-                    (latestDrawerDoc.nayanTodayCash ?? (latestDrawerDoc.nayanOpeningCash === undefined ? latestDrawerDoc.nayanCash ?? 0 : 0)) +
-                    (latestDrawerDoc.accountTodayCash ?? (latestDrawerDoc.accountOpeningCash === undefined ? latestDrawerDoc.accountCash ?? 0 : 0)),
-        total: (latestDrawerDoc.khaOfficeCash ?? 0) + (latestDrawerDoc.dhakaOfficeCash ?? 0) + (latestDrawerDoc.nayanCash ?? 0) + (latestDrawerDoc.accountCash ?? 0),
-      } : {
-        khaOpening: 0, khaToday: 0, khaTotal: 0,
-        dhakaOpening: 0, dhakaToday: 0, dhakaTotal: 0,
-        nayanOpening: 0, nayanToday: 0, nayanTotal: 0,
-        accountOpening: 0, accountToday: 0, accountTotal: 0,
-        totalOpening: 0, totalToday: 0, total: 0,
+        totalOpening: khaOpen + dhakaOpen + nayanOpen + accOpen,
+        totalToday: khaMonth + dhakaMonth + nayanMonth + accMonth,
+        total: khaClose + dhakaClose + nayanClose + accClose,
       },
       transfers: {
-        khaDhakaOpening: totalTransferKhaDhakaOpening,
-        khaDhakaToday: totalTransferKhaDhakaToday,
-        khaToNayan: totalTransferKhaToNayan,
+        khaDhakaOpening: t1Open,
+        khaDhakaToday: t1Month,
+        khaToNayan: t1Close,
 
-        dhakaKhaOpening: totalTransferDhakaKhaOpening,
-        dhakaKhaToday: totalTransferDhakaKhaToday,
-        nayanToDhaka: totalTransferNayanToDhaka,
+        dhakaKhaOpening: t2Open,
+        dhakaKhaToday: t2Month,
+        nayanToDhaka: t2Close,
 
-        bkashAccountOpening: totalTransferBkashAccountOpening,
-        bkashAccountToday: totalTransferBkashAccountToday,
-        dhakaToNayan: totalTransferDhakaToNayan,
+        bkashAccountOpening: t3Open,
+        bkashAccountToday: t3Month,
+        dhakaToNayan: t3Close,
 
-        accountDhakaOpening: totalTransferAccountDhakaOpening,
-        accountDhakaToday: totalTransferAccountDhakaToday,
-        dhakaToKha: totalTransferDhakaToKha,
+        accountDhakaOpening: t4Open,
+        accountDhakaToday: t4Month,
+        dhakaToKha: t4Close,
 
-        totalOpening: totalTransferKhaDhakaOpening + totalTransferDhakaKhaOpening + totalTransferBkashAccountOpening + totalTransferAccountDhakaOpening,
-        totalToday: totalTransferKhaDhakaToday + totalTransferDhakaKhaToday + totalTransferBkashAccountToday + totalTransferAccountDhakaToday,
-        total: totalTransferKhaToNayan + totalTransferNayanToDhaka + totalTransferDhakaToNayan + totalTransferDhakaToKha,
+        totalOpening: t1Open + t2Open + t3Open + t4Open,
+        totalToday: t1Month + t2Month + t3Month + t4Month,
+        total: t1Close + t2Close + t3Close + t4Close,
       },
     };
   };
@@ -817,13 +920,19 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile, 
 
       let nextY = (doc as any).lastAutoTable.finalY + 8;
 
-      if (summary.latestDrawerDoc) {
+      if (
+        summary.latestDrawerDoc ||
+        summary.physicalCash.totalOpening !== 0 ||
+        summary.physicalCash.total !== 0 ||
+        summary.transfers.totalOpening !== 0 ||
+        summary.transfers.total !== 0
+      ) {
         doc.setFontSize(9.5);
         doc.setTextColor(15, 23, 42);
-        doc.text(`Cash Summary Details (${summary.latestDrawerDoc.date})`, 14, nextY);
+        doc.text(`Cash Summary Details (${summary.month})`, 14, nextY);
         autoTable(doc, {
           startY: nextY + 3,
-          head: [['Cash Summary Details', 'Opening Balance', 'Today Amount', 'Total Amount']],
+          head: [['Cash Summary Details', 'Opening Balance', 'Month Amount', 'Total Amount']],
           body: [
             ['Khagrachari Office Cash', `${summary.physicalCash.khaOpening.toLocaleString()} BDT`, `${summary.physicalCash.khaToday.toLocaleString()} BDT`, `${summary.physicalCash.khaTotal.toLocaleString()} BDT`],
             ['Dhaka Office Cash', `${summary.physicalCash.dhakaOpening.toLocaleString()} BDT`, `${summary.physicalCash.dhakaToday.toLocaleString()} BDT`, `${summary.physicalCash.dhakaTotal.toLocaleString()} BDT`],
@@ -1034,7 +1143,7 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile, 
         ...summary.methods.map((m) => [m.label, m.open, m.income, m.expense, m.close, m.pl]),
         ['TOTAL', summary.totalOpen, summary.totalIncome, summary.totalExpense, summary.totalClose, summary.totalPL],
         [],
-        ['CASH SUMMARY DETAILS (LATEST SNAPSHOT)', 'OPENING BALANCE (BDT)', 'TODAY AMOUNT (BDT)', 'TOTAL AMOUNT (BDT)'],
+        ['CASH SUMMARY DETAILS', 'OPENING BALANCE (BDT)', 'MONTH AMOUNT (BDT)', 'TOTAL AMOUNT (BDT)'],
         ['Khagrachari Office Cash', summary.physicalCash.khaOpening, summary.physicalCash.khaToday, summary.physicalCash.khaTotal],
         ['Dhaka Office Cash', summary.physicalCash.dhakaOpening, summary.physicalCash.dhakaToday, summary.physicalCash.dhakaTotal],
         ['bKash Merchants Cash', summary.physicalCash.nayanOpening, summary.physicalCash.nayanToday, summary.physicalCash.nayanTotal],
@@ -1092,7 +1201,7 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile, 
           tx.date || '',
           (tx.type || '').toUpperCase(),
           getCategoryLabel(tx),
-          (tx.paymentMethod || 'cash').toUpperCase(),
+          getPaymentMethodLabel(tx.paymentMethod, true),
           Number(tx.amount) || 0,
           tx.notes || '',
         ]),
@@ -1367,15 +1476,15 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile, 
               <div class="grid-2" style="align-items: stretch;">
                 <div class="section" style="margin-bottom: 0; padding: 8px 9px;">
                   <div class="section-title" style="margin-bottom: 5px; padding-bottom: 4px;">
-                    <span>Cash Summary Details (Latest)</span>
-                    <span>${summary.latestDrawerDoc ? summary.latestDrawerDoc.date : 'No Entry'}</span>
+                    <span>Cash Summary Details</span>
+                    <span>${summary.month}</span>
                   </div>
                   <table style="font-size: 8.5px;">
                     <thead>
                       <tr>
                         <th style="padding: 3px 2px; font-size: 7px;">Description</th>
                         <th class="num" style="padding: 3px 2px; font-size: 7px; white-space: nowrap;">Opening Balance</th>
-                        <th class="num" style="padding: 3px 2px; font-size: 7px; white-space: nowrap;">Today Amount</th>
+                        <th class="num" style="padding: 3px 2px; font-size: 7px; white-space: nowrap;">Month Amount</th>
                         <th class="num" style="padding: 3px 2px; font-size: 7px; white-space: nowrap;">Total Amount</th>
                       </tr>
                     </thead>
@@ -1513,7 +1622,8 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile, 
       setOpeningCash((existingClosedToday.openingCash ?? 0).toString());
       setOpeningBkash((existingClosedToday.openingBkash ?? 0).toString());
       setOpeningNagad((existingClosedToday.openingNagad ?? 0).toString());
-      setOpeningRocket((existingClosedToday.openingRocket ?? 0).toString());
+      setOpeningRocket((existingClosedToday.openingBkashP ?? existingClosedToday.openingRocket ?? 0).toString());
+      setOpeningNagadP((existingClosedToday.openingNagadP ?? 0).toString());
       setOpeningBank((existingClosedToday.openingBank ?? 0).toString());
       setOpeningSsl((existingClosedToday.openingSsl ?? 0).toString());
       return;
@@ -1523,7 +1633,8 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile, 
     setOpeningCash(autoOpening.cash.toString());
     setOpeningBkash(autoOpening.bkash.toString());
     setOpeningNagad(autoOpening.nagad.toString());
-    setOpeningRocket(autoOpening.rocket.toString());
+    setOpeningRocket(autoOpening.bkash_p.toString());
+    setOpeningNagadP(autoOpening.nagad_p.toString());
     setOpeningBank(autoOpening.bank.toString());
     setOpeningSsl(autoOpening.sslcommerz.toString());
   }, [selectedDate, closings, dailyClosingOnlyTransactions]);
@@ -1534,15 +1645,19 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile, 
     const fetchDrawerForDate = async () => {
       try {
         setError('');
-        const existingToday = closings.find((c) => c.date === selectedDate);
+        const sameDateDocs = closings.filter((c) => c.date === selectedDate);
+        const existingToday = sameDateDocs.find(hasDrawerBalances) || sameDateDocs[0];
         const todayDocId = existingToday ? existingToday.id : `dc_${userId}_${selectedDate}`;
         const todayDocRef = doc(db, 'daily_closings', todayDocId);
 
-        let todayData: DailyClosing | null = null;
+        let todayData: DailyClosing | null = existingToday || null;
         try {
           const todayDocSnap = await getDoc(todayDocRef);
           if (todayDocSnap.exists()) {
-            todayData = todayDocSnap.data() as DailyClosing;
+            const snapData = todayDocSnap.data() as DailyClosing;
+            if (!todayData || hasDrawerBalances(snapData)) {
+              todayData = snapData;
+            }
           }
         } catch {
           todayData = existingToday || null;
@@ -1551,30 +1666,32 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile, 
         const prior = getPriorDrawerTotals(selectedDate);
         const isDateChanged = lastDateRef.current !== selectedDate;
 
-        // If today already has a submitted drawer statement or is locked/closed, load saved values
-        if (todayData && (todayData.isDrawerSubmitted || todayData.status === 'closed')) {
+        // If today already has a submitted drawer statement or closed record WITH actual non-zero drawer values,
+        // load its saved values (still carrying forward prior Opening Balance if saved Opening was all 0s).
+        if (todayData && (todayData.isDrawerSubmitted || todayData.status === 'closed') && hasDrawerBalances(todayData)) {
+          const resolved = resolveClosingDrawer(todayData);
           if (isDateChanged) {
-            setKhaOpening((todayData.khaOpeningCash ?? prior.khaOpening).toString());
-            setDhakaOpening((todayData.dhakaOpeningCash ?? prior.dhakaOpening).toString());
-            setNayanOpening((todayData.nayanOpeningCash ?? prior.nayanOpening).toString());
-            setAccountOpening((todayData.accountOpeningCash ?? prior.accountOpening).toString());
+            setKhaOpening((resolved.khaOpeningCash ?? 0).toString());
+            setDhakaOpening((resolved.dhakaOpeningCash ?? 0).toString());
+            setNayanOpening((resolved.nayanOpeningCash ?? 0).toString());
+            setAccountOpening((resolved.accountOpeningCash ?? 0).toString());
 
-            setKhaOfficeCash((todayData.khaTodayCash ?? todayData.khaOfficeCash ?? 0).toString());
-            setDhakaOfficeCash((todayData.dhakaTodayCash ?? todayData.dhakaOfficeCash ?? 0).toString());
-            setNayanCash((todayData.nayanTodayCash ?? todayData.nayanCash ?? 0).toString());
-            setAccountCash((todayData.accountTodayCash ?? todayData.accountCash ?? 0).toString());
+            setKhaOfficeCash((resolved.khaTodayCash ?? 0).toString());
+            setDhakaOfficeCash((resolved.dhakaTodayCash ?? 0).toString());
+            setNayanCash((resolved.nayanTodayCash ?? 0).toString());
+            setAccountCash((resolved.accountTodayCash ?? 0).toString());
 
-            setTransferKhaDhakaOpening((todayData.transferKhaDhakaOpening ?? prior.transfer1Opening).toString());
-            setTransferKhaDhakaToday((todayData.transferKhaDhakaToday ?? todayData.transferKhaToNayan ?? 0).toString());
+            setTransferKhaDhakaOpening((resolved.transferKhaDhakaOpening ?? 0).toString());
+            setTransferKhaDhakaToday((resolved.transferKhaDhakaToday ?? 0).toString());
 
-            setTransferDhakaKhaOpening((todayData.transferDhakaKhaOpening ?? prior.transfer2Opening).toString());
-            setTransferDhakaKhaToday((todayData.transferDhakaKhaToday ?? todayData.transferNayanToDhaka ?? 0).toString());
+            setTransferDhakaKhaOpening((resolved.transferDhakaKhaOpening ?? 0).toString());
+            setTransferDhakaKhaToday((resolved.transferDhakaKhaToday ?? 0).toString());
 
-            setTransferBkashAccountOpening((todayData.transferBkashAccountOpening ?? prior.transfer3Opening).toString());
-            setTransferBkashAccountToday((todayData.transferBkashAccountToday ?? todayData.transferDhakaToNayan ?? 0).toString());
+            setTransferBkashAccountOpening((resolved.transferBkashAccountOpening ?? 0).toString());
+            setTransferBkashAccountToday((resolved.transferBkashAccountToday ?? 0).toString());
 
-            setTransferAccountDhakaOpening((todayData.transferAccountDhakaOpening ?? prior.transfer4Opening).toString());
-            setTransferAccountDhakaToday((todayData.transferAccountDhakaToday ?? todayData.transferDhakaToKha ?? 0).toString());
+            setTransferAccountDhakaOpening((resolved.transferAccountDhakaOpening ?? 0).toString());
+            setTransferAccountDhakaToday((resolved.transferAccountDhakaToday ?? 0).toString());
 
             setIsDrawerSubmitted(true);
           }
@@ -1582,8 +1699,8 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile, 
           return;
         }
 
-        // Otherwise (unsubmitted draft, new date, or prior day just closed/updated):
-        // Automatically populate Opening Balance from the prior day's Total Amount!
+        // Otherwise (new date, unsubmitted draft, or empty 0-only doc saved before carry-forward):
+        // Automatically populate Opening Balance from the prior day's carried-forward Total Amount!
         setKhaOpening(prior.khaOpening.toString());
         setDhakaOpening(prior.dhakaOpening.toString());
         setNayanOpening(prior.nayanOpening.toString());
@@ -1620,14 +1737,10 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile, 
   const dateTransactions = dailyClosingOnlyTransactions.filter(t => t.date === selectedDate);
   
   // Aggregate functions by payment method
-  const getAggregates = (method: string) => {
-    const methodTransactions = dateTransactions.filter(t => {
-      const pm = (t.paymentMethod || 'cash').trim().toLowerCase();
-      if (method === 'cash') {
-        return pm === 'cash' || !t.paymentMethod;
-      }
-      return pm === method;
-    });
+  const getAggregates = (method: PaymentMethodKey) => {
+    const methodTransactions = dateTransactions.filter(
+      (t) => normalizePaymentMethodKey(t.paymentMethod) === method
+    );
 
     const income = methodTransactions
       .filter(t => t.type === 'income')
@@ -1643,7 +1756,8 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile, 
   const cashFlow = getAggregates('cash');
   const bkashFlow = getAggregates('bkash');
   const nagadFlow = getAggregates('nagad');
-  const rocketFlow = getAggregates('rocket');
+  const rocketFlow = getAggregates('bkash_p');
+  const nagadPFlow = getAggregates('nagad_p');
   const bankFlow = getAggregates('bank');
   const sslFlow = getAggregates('sslcommerz');
 
@@ -1658,21 +1772,23 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile, 
   const closingBkash = val(openingBkash) + bkashFlow.income - bkashFlow.expense;
   const closingNagad = val(openingNagad) + nagadFlow.income - nagadFlow.expense;
   const closingRocket = val(openingRocket) + rocketFlow.income - rocketFlow.expense;
+  const closingNagadP = val(openingNagadP) + nagadPFlow.income - nagadPFlow.expense;
   const closingBank = val(openingBank) + bankFlow.income - bankFlow.expense;
   const closingSsl = val(openingSsl) + sslFlow.income - sslFlow.expense;
 
-  const totalOpening = val(openingCash) + val(openingBkash) + val(openingNagad) + val(openingRocket) + val(openingBank) + val(openingSsl);
-  const totalInflow = cashFlow.income + bkashFlow.income + nagadFlow.income + rocketFlow.income + bankFlow.income + sslFlow.income;
-  const totalOutflow = cashFlow.expense + bkashFlow.expense + nagadFlow.expense + rocketFlow.expense + bankFlow.expense + sslFlow.expense;
-  const totalClosing = closingCash + closingBkash + closingNagad + closingRocket + closingBank + closingSsl;
+  const totalOpening = val(openingCash) + val(openingBkash) + val(openingNagad) + val(openingRocket) + val(openingNagadP) + val(openingBank) + val(openingSsl);
+  const totalInflow = cashFlow.income + bkashFlow.income + nagadFlow.income + rocketFlow.income + nagadPFlow.income + bankFlow.income + sslFlow.income;
+  const totalOutflow = cashFlow.expense + bkashFlow.expense + nagadFlow.expense + rocketFlow.expense + nagadPFlow.expense + bankFlow.expense + sslFlow.expense;
+  const totalClosing = closingCash + closingBkash + closingNagad + closingRocket + closingNagadP + closingBank + closingSsl;
 
   // Helper to retrieve the opening balance of a payment method
   const getPreviousBalanceForMethod = (method: string): number => {
-    switch (method.toLowerCase()) {
+    switch (normalizePaymentMethodKey(method)) {
       case 'cash': return val(openingCash);
       case 'bkash': return val(openingBkash);
       case 'nagad': return val(openingNagad);
-      case 'rocket': return val(openingRocket);
+      case 'bkash_p': return val(openingRocket);
+      case 'nagad_p': return val(openingNagadP);
       case 'bank': return val(openingBank);
       case 'sslcommerz': return val(openingSsl);
       default: return 0;
@@ -1683,19 +1799,20 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile, 
   const entryClosingBalance = entryPreviousBalance + (parseFloat(entryAmount) || 0);
 
   const getPrevBalanceForTx = (tx: Transaction): number => {
-    const method = (tx.paymentMethod || 'cash').trim().toLowerCase() || 'cash';
+    const methodKey = normalizePaymentMethodKey(tx.paymentMethod);
 
     if (tx.date === selectedDate) {
-      return getPreviousBalanceForMethod(method);
+      return getPreviousBalanceForMethod(methodKey);
     }
 
     const closedOnTxDate = closings.find((c) => c.date === tx.date && c.status === 'closed');
     if (closedOnTxDate) {
-      switch (method) {
+      switch (methodKey) {
         case 'cash': return Number(closedOnTxDate.openingCash ?? 0);
         case 'bkash': return Number(closedOnTxDate.openingBkash ?? 0);
         case 'nagad': return Number(closedOnTxDate.openingNagad ?? 0);
-        case 'rocket': return Number(closedOnTxDate.openingRocket ?? 0);
+        case 'bkash_p': return Number(closedOnTxDate.openingBkashP ?? closedOnTxDate.openingRocket ?? 0);
+        case 'nagad_p': return Number(closedOnTxDate.openingNagadP ?? 0);
         case 'bank': return Number(closedOnTxDate.openingBank ?? 0);
         case 'sslcommerz': return Number(closedOnTxDate.openingSsl ?? 0);
         default: return 0;
@@ -1703,15 +1820,7 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile, 
     }
 
     const openingForTxDate = computeOpeningBalancesForDate(tx.date);
-    switch (method) {
-      case 'cash': return openingForTxDate.cash;
-      case 'bkash': return openingForTxDate.bkash;
-      case 'nagad': return openingForTxDate.nagad;
-      case 'rocket': return openingForTxDate.rocket;
-      case 'bank': return openingForTxDate.bank;
-      case 'sslcommerz': return openingForTxDate.sslcommerz;
-      default: return 0;
-    }
+    return openingForTxDate[methodKey] ?? 0;
   };
 
   const getCategoryLabel = (tx: Transaction) => {
@@ -1813,7 +1922,7 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile, 
           idx + 1,
           `"${tx.date}"`,
           `"${categoryLabel.replace(/"/g, '""')}"`,
-          `"${(tx.paymentMethod || 'cash').toUpperCase()}"`,
+          `"${getPaymentMethodLabel(tx.paymentMethod, true).replace(/"/g, '""')}"`,
           `"${tx.type.toUpperCase()}"`,
           tx.amount,
           prevBal,
@@ -1964,8 +2073,8 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile, 
                         <td class="py-2.5 px-3 text-slate-500 font-semibold font-mono whitespace-nowrap">${tx.date}</td>
                         <td class="py-2.5 px-3 font-bold text-slate-800">${catLabel}</td>
                         <td class="py-2.5 px-3 whitespace-nowrap">
-                          <span class="inline-block bg-slate-100 text-slate-600 text-[10px] font-bold px-1.5 py-0.5 rounded uppercase font-mono">
-                            ${tx.paymentMethod || 'cash'}
+                          <span class="inline-block bg-slate-100 text-slate-600 text-[10px] font-bold px-1.5 py-0.5 rounded font-mono">
+                            ${getPaymentMethodLabel(tx.paymentMethod, true)}
                           </span>
                         </td>
                         <td class="py-2.5 px-3 text-right font-bold font-mono whitespace-nowrap ${isInc ? 'text-emerald-600' : 'text-rose-600'}">
@@ -2036,7 +2145,7 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile, 
 
     const methodFlows: { [key: string]: { income: number; expense: number } } = {};
     dailyClosingTxs.forEach(t => {
-      const pm = (t.paymentMethod || 'cash').toUpperCase();
+      const pm = getPaymentMethodLabel(t.paymentMethod, true);
       if (!methodFlows[pm]) {
         methodFlows[pm] = { income: 0, expense: 0 };
       }
@@ -2368,7 +2477,8 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile, 
     setEditingTx(tx);
     setEditingTxCategory(tx.category);
     setEditingTxAmount(tx.amount.toString());
-    setEditingTxPaymentMethod(tx.paymentMethod || 'cash');
+    const rawPm = (tx.paymentMethod || 'cash').trim().toLowerCase();
+    setEditingTxPaymentMethod(['upay', 'cellfin', 'tap'].includes(rawPm) ? rawPm : normalizePaymentMethodKey(tx.paymentMethod));
   };
 
   // Submit Edited Statement
@@ -2524,6 +2634,8 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile, 
         payload.openingBkash = parseFloat(openingBkash || '0');
         payload.openingNagad = parseFloat(openingNagad || '0');
         payload.openingRocket = parseFloat(openingRocket || '0');
+        payload.openingBkashP = parseFloat(openingRocket || '0');
+        payload.openingNagadP = parseFloat(openingNagadP || '0');
         payload.openingBank = parseFloat(openingBank || '0');
         payload.openingSsl = parseFloat(openingSsl || '0');
         payload.createdAt = serverTimestamp();
@@ -2584,6 +2696,8 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile, 
         openingBkash: val(openingBkash),
         openingNagad: val(openingNagad),
         openingRocket: val(openingRocket),
+        openingBkashP: val(openingRocket),
+        openingNagadP: val(openingNagadP),
         openingBank: val(openingBank),
         openingSsl: val(openingSsl),
 
@@ -2591,6 +2705,8 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile, 
         closingBkash,
         closingNagad,
         closingRocket,
+        closingBkashP: closingRocket,
+        closingNagadP,
         closingBank,
         closingSsl,
 
@@ -2598,6 +2714,8 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile, 
         totalBkashIn: bkashFlow.income,
         totalNagadIn: nagadFlow.income,
         totalRocketIn: rocketFlow.income,
+        totalBkashPIn: rocketFlow.income,
+        totalNagadPIn: nagadPFlow.income,
         totalBankIn: bankFlow.income,
         totalSslIn: sslFlow.income,
 
@@ -2605,6 +2723,8 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile, 
         totalBkashOut: bkashFlow.expense,
         totalNagadOut: nagadFlow.expense,
         totalRocketOut: rocketFlow.expense,
+        totalBkashPOut: rocketFlow.expense,
+        totalNagadPOut: nagadPFlow.expense,
         totalBankOut: bankFlow.expense,
         totalSslOut: sslFlow.expense,
 
@@ -2681,7 +2801,7 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile, 
   const handlePrintCurrent = () => {
     const existing = closings.find(c => c.date === selectedDate);
     if (existing && existing.status === 'closed') {
-      setPrintPreviewData(existing);
+      setPrintPreviewData(resolveClosingDrawer(existing));
     } else {
       const activeObj: DailyClosing = {
         id: existing ? existing.id : `dc_${userId}_${selectedDate}`,
@@ -2691,6 +2811,8 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile, 
         openingBkash: val(openingBkash),
         openingNagad: val(openingNagad),
         openingRocket: val(openingRocket),
+        openingBkashP: val(openingRocket),
+        openingNagadP: val(openingNagadP),
         openingBank: val(openingBank),
         openingSsl: val(openingSsl),
 
@@ -2698,6 +2820,8 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile, 
         closingBkash,
         closingNagad,
         closingRocket,
+        closingBkashP: closingRocket,
+        closingNagadP,
         closingBank,
         closingSsl,
 
@@ -2705,6 +2829,8 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile, 
         totalBkashIn: bkashFlow.income,
         totalNagadIn: nagadFlow.income,
         totalRocketIn: rocketFlow.income,
+        totalBkashPIn: rocketFlow.income,
+        totalNagadPIn: nagadPFlow.income,
         totalBankIn: bankFlow.income,
         totalSslIn: sslFlow.income,
 
@@ -2712,6 +2838,8 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile, 
         totalBkashOut: bkashFlow.expense,
         totalNagadOut: nagadFlow.expense,
         totalRocketOut: rocketFlow.expense,
+        totalBkashPOut: rocketFlow.expense,
+        totalNagadPOut: nagadPFlow.expense,
         totalBankOut: bankFlow.expense,
         totalSslOut: sslFlow.expense,
 
@@ -2754,10 +2882,11 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile, 
 
   // 6. Direct Print Layout
   const handlePrint = (dc: DailyClosing) => {
-    setPrintPreviewData(dc);
+    setPrintPreviewData(resolveClosingDrawer(dc));
   };
 
-  const handleDownloadClosingPDF = (dc: DailyClosing) => {
+  const handleDownloadClosingPDF = (rawDc: DailyClosing) => {
+    const dc = resolveClosingDrawer(rawDc);
     try {
       const doc = new jsPDF();
       
@@ -2790,10 +2919,11 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile, 
 
       const tableRows = [
         ['Cash', `${(dc.openingCash ?? 0).toLocaleString()} BDT`, `+${(dc.totalCashIn ?? 0).toLocaleString()} BDT`, `-${(dc.totalCashOut ?? 0).toLocaleString()} BDT`, `${(dc.closingCash ?? 0).toLocaleString()} BDT`],
-        ['bKash', `${(dc.openingBkash ?? 0).toLocaleString()} BDT`, `+${(dc.totalBkashIn ?? 0).toLocaleString()} BDT`, `-${(dc.totalBkashOut ?? 0).toLocaleString()} BDT`, `${(dc.closingBkash ?? 0).toLocaleString()} BDT`],
-        ['Nagad', `${(dc.openingNagad ?? 0).toLocaleString()} BDT`, `+${(dc.totalNagadIn ?? 0).toLocaleString()} BDT`, `-${(dc.totalNagadOut ?? 0).toLocaleString()} BDT`, `${(dc.closingNagad ?? 0).toLocaleString()} BDT`],
-        ['Rocket', `${(dc.openingRocket ?? 0).toLocaleString()} BDT`, `+${(dc.totalRocketIn ?? 0).toLocaleString()} BDT`, `-${(dc.totalRocketOut ?? 0).toLocaleString()} BDT`, `${(dc.closingRocket ?? 0).toLocaleString()} BDT`],
-        ['Bank Transfer', `${(dc.openingBank ?? 0).toLocaleString()} BDT`, `+${(dc.totalBankIn ?? 0).toLocaleString()} BDT`, `-${(dc.totalBankOut ?? 0).toLocaleString()} BDT`, `${(dc.closingBank ?? 0).toLocaleString()} BDT`],
+        ['bKash Merchant', `${(dc.openingBkash ?? 0).toLocaleString()} BDT`, `+${(dc.totalBkashIn ?? 0).toLocaleString()} BDT`, `-${(dc.totalBkashOut ?? 0).toLocaleString()} BDT`, `${(dc.closingBkash ?? 0).toLocaleString()} BDT`],
+        ['Nagad Merchant', `${(dc.openingNagad ?? 0).toLocaleString()} BDT`, `+${(dc.totalNagadIn ?? 0).toLocaleString()} BDT`, `-${(dc.totalNagadOut ?? 0).toLocaleString()} BDT`, `${(dc.closingNagad ?? 0).toLocaleString()} BDT`],
+        ['bKash (P)', `${(dc.openingBkashP ?? dc.openingRocket ?? 0).toLocaleString()} BDT`, `+${(dc.totalBkashPIn ?? dc.totalRocketIn ?? 0).toLocaleString()} BDT`, `-${(dc.totalBkashPOut ?? dc.totalRocketOut ?? 0).toLocaleString()} BDT`, `${(dc.closingBkashP ?? dc.closingRocket ?? 0).toLocaleString()} BDT`],
+        ['Nagad (P)', `${(dc.openingNagadP ?? 0).toLocaleString()} BDT`, `+${(dc.totalNagadPIn ?? 0).toLocaleString()} BDT`, `-${(dc.totalNagadPOut ?? 0).toLocaleString()} BDT`, `${(dc.closingNagadP ?? 0).toLocaleString()} BDT`],
+        ['Bank', `${(dc.openingBank ?? 0).toLocaleString()} BDT`, `+${(dc.totalBankIn ?? 0).toLocaleString()} BDT`, `-${(dc.totalBankOut ?? 0).toLocaleString()} BDT`, `${(dc.closingBank ?? 0).toLocaleString()} BDT`],
         ['SSL Commerz', `${(dc.openingSsl ?? 0).toLocaleString()} BDT`, `+${(dc.totalSslIn ?? 0).toLocaleString()} BDT`, `-${(dc.totalSslOut ?? 0).toLocaleString()} BDT`, `${(dc.closingSsl ?? 0).toLocaleString()} BDT`],
       ];
 
@@ -2932,10 +3062,10 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile, 
       const previewTxs = dailyClosingOnlyTransactions.filter(t => t.date === dc.date);
 
       // Financial Summary Box
-      const totalIn = (dc.totalCashIn ?? 0) + (dc.totalBkashIn ?? 0) + (dc.totalNagadIn ?? 0) + (dc.totalRocketIn ?? 0) + (dc.totalBankIn ?? 0) + (dc.totalSslIn ?? 0);
-      const totalOut = (dc.totalCashOut ?? 0) + (dc.totalBkashOut ?? 0) + (dc.totalNagadOut ?? 0) + (dc.totalRocketOut ?? 0) + (dc.totalBankOut ?? 0) + (dc.totalSslOut ?? 0);
-      const totalOpenBal = (dc.openingCash ?? 0) + (dc.openingBkash ?? 0) + (dc.openingNagad ?? 0) + (dc.openingRocket ?? 0) + (dc.openingBank ?? 0) + (dc.openingSsl ?? 0);
-      const totalCloseBal = (dc.closingCash ?? 0) + (dc.closingBkash ?? 0) + (dc.closingNagad ?? 0) + (dc.closingRocket ?? 0) + (dc.closingBank ?? 0) + (dc.closingSsl ?? 0);
+      const totalIn = (dc.totalCashIn ?? 0) + (dc.totalBkashIn ?? 0) + (dc.totalNagadIn ?? 0) + (dc.totalBkashPIn ?? dc.totalRocketIn ?? 0) + (dc.totalNagadPIn ?? 0) + (dc.totalBankIn ?? 0) + (dc.totalSslIn ?? 0);
+      const totalOut = (dc.totalCashOut ?? 0) + (dc.totalBkashOut ?? 0) + (dc.totalNagadOut ?? 0) + (dc.totalBkashPOut ?? dc.totalRocketOut ?? 0) + (dc.totalNagadPOut ?? 0) + (dc.totalBankOut ?? 0) + (dc.totalSslOut ?? 0);
+      const totalOpenBal = (dc.openingCash ?? 0) + (dc.openingBkash ?? 0) + (dc.openingNagad ?? 0) + (dc.openingBkashP ?? dc.openingRocket ?? 0) + (dc.openingNagadP ?? 0) + (dc.openingBank ?? 0) + (dc.openingSsl ?? 0);
+      const totalCloseBal = (dc.closingCash ?? 0) + (dc.closingBkash ?? 0) + (dc.closingNagad ?? 0) + (dc.closingBkashP ?? dc.closingRocket ?? 0) + (dc.closingNagadP ?? 0) + (dc.closingBank ?? 0) + (dc.closingSsl ?? 0);
 
       if (nextStartY + 36 > 280) {
         doc.addPage();
@@ -3088,7 +3218,7 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile, 
 
         const txRows = previewTxs.map(t => [
           getCategoryLabel(t),
-          t.paymentMethod || 'cash',
+          getPaymentMethodLabel(t.paymentMethod, true),
           t.type === 'income' ? 'INCOME (+)' : 'EXPENSE (-)',
           `${(t.amount ?? 0).toLocaleString()} BDT`
         ]);
@@ -3158,7 +3288,8 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile, 
     }
   };
 
-  const handleOpenClosingPrintView = (dc: DailyClosing) => {
+  const handleOpenClosingPrintView = (rawDc: DailyClosing) => {
+    const dc = resolveClosingDrawer(rawDc);
     try {
       const escapeHtml = (val: string) =>
         val
@@ -3171,39 +3302,44 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile, 
         (dc.totalCashIn ?? 0) +
         (dc.totalBkashIn ?? 0) +
         (dc.totalNagadIn ?? 0) +
-        (dc.totalRocketIn ?? 0) +
+        (dc.totalBkashPIn ?? dc.totalRocketIn ?? 0) +
+        (dc.totalNagadPIn ?? 0) +
         (dc.totalBankIn ?? 0) +
         (dc.totalSslIn ?? 0);
       const totalOut =
         (dc.totalCashOut ?? 0) +
         (dc.totalBkashOut ?? 0) +
         (dc.totalNagadOut ?? 0) +
-        (dc.totalRocketOut ?? 0) +
+        (dc.totalBkashPOut ?? dc.totalRocketOut ?? 0) +
+        (dc.totalNagadPOut ?? 0) +
         (dc.totalBankOut ?? 0) +
         (dc.totalSslOut ?? 0);
       const totalOpenBal =
         (dc.openingCash ?? 0) +
         (dc.openingBkash ?? 0) +
         (dc.openingNagad ?? 0) +
-        (dc.openingRocket ?? 0) +
+        (dc.openingBkashP ?? dc.openingRocket ?? 0) +
+        (dc.openingNagadP ?? 0) +
         (dc.openingBank ?? 0) +
         (dc.openingSsl ?? 0);
       const totalCloseBal =
         (dc.closingCash ?? 0) +
         (dc.closingBkash ?? 0) +
         (dc.closingNagad ?? 0) +
-        (dc.closingRocket ?? 0) +
+        (dc.closingBkashP ?? dc.closingRocket ?? 0) +
+        (dc.closingNagadP ?? 0) +
         (dc.closingBank ?? 0) +
         (dc.closingSsl ?? 0);
       const totalPL = totalIn - totalOut;
 
       const methods = [
         { name: 'Cash', open: dc.openingCash ?? 0, inc: dc.totalCashIn ?? 0, exp: dc.totalCashOut ?? 0, close: dc.closingCash ?? 0 },
-        { name: 'bKash', open: dc.openingBkash ?? 0, inc: dc.totalBkashIn ?? 0, exp: dc.totalBkashOut ?? 0, close: dc.closingBkash ?? 0 },
-        { name: 'Nagad', open: dc.openingNagad ?? 0, inc: dc.totalNagadIn ?? 0, exp: dc.totalNagadOut ?? 0, close: dc.closingNagad ?? 0 },
-        { name: 'Rocket', open: dc.openingRocket ?? 0, inc: dc.totalRocketIn ?? 0, exp: dc.totalRocketOut ?? 0, close: dc.closingRocket ?? 0 },
+        { name: 'bKash Merchant', open: dc.openingBkash ?? 0, inc: dc.totalBkashIn ?? 0, exp: dc.totalBkashOut ?? 0, close: dc.closingBkash ?? 0 },
+        { name: 'Nagad Merchant', open: dc.openingNagad ?? 0, inc: dc.totalNagadIn ?? 0, exp: dc.totalNagadOut ?? 0, close: dc.closingNagad ?? 0 },
+        { name: 'bKash (P)', open: dc.openingBkashP ?? dc.openingRocket ?? 0, inc: dc.totalBkashPIn ?? dc.totalRocketIn ?? 0, exp: dc.totalBkashPOut ?? dc.totalRocketOut ?? 0, close: dc.closingBkashP ?? dc.closingRocket ?? 0 },
+        { name: 'Nagad (P)', open: dc.openingNagadP ?? 0, inc: dc.totalNagadPIn ?? 0, exp: dc.totalNagadPOut ?? 0, close: dc.closingNagadP ?? 0 },
         { name: 'Bank', open: dc.openingBank ?? 0, inc: dc.totalBankIn ?? 0, exp: dc.totalBankOut ?? 0, close: dc.closingBank ?? 0 },
-        { name: 'SSL', open: dc.openingSsl ?? 0, inc: dc.totalSslIn ?? 0, exp: dc.totalSslOut ?? 0, close: dc.closingSsl ?? 0 },
+        { name: 'SSL Commerz', open: dc.openingSsl ?? 0, inc: dc.totalSslIn ?? 0, exp: dc.totalSslOut ?? 0, close: dc.closingSsl ?? 0 },
       ];
 
       const previewTxs = dailyClosingOnlyTransactions.filter((t) => t.date === dc.date);
@@ -3492,7 +3628,7 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile, 
                       ${previewTxs.map((tx) => `
                         <tr>
                           <td class="bold">${escapeHtml(getCategoryLabel(tx))}</td>
-                          <td style="text-transform: capitalize;">${escapeHtml(tx.paymentMethod || 'cash')}</td>
+                          <td>${escapeHtml(getPaymentMethodLabel(tx.paymentMethod, true))}</td>
                           <td style="text-align: right;" class="${tx.type === 'income' ? 'inc' : 'exp'}">${tx.type === 'income' ? 'INCOME' : 'EXPENSE'}</td>
                           <td class="num ${tx.type === 'income' ? 'inc' : 'exp'}">${tx.type === 'income' ? '+' : '-'}${(tx.amount ?? 0).toLocaleString()} BDT</td>
                         </tr>
@@ -3526,43 +3662,49 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile, 
     }
   };
 
-  const handleDownloadClosingExcel = (dc: DailyClosing) => {
+  const handleDownloadClosingExcel = (rawDc: DailyClosing) => {
+    const dc = resolveClosingDrawer(rawDc);
     try {
       const totalIn =
         (dc.totalCashIn ?? 0) +
         (dc.totalBkashIn ?? 0) +
         (dc.totalNagadIn ?? 0) +
-        (dc.totalRocketIn ?? 0) +
+        (dc.totalBkashPIn ?? dc.totalRocketIn ?? 0) +
+        (dc.totalNagadPIn ?? 0) +
         (dc.totalBankIn ?? 0) +
         (dc.totalSslIn ?? 0);
       const totalOut =
         (dc.totalCashOut ?? 0) +
         (dc.totalBkashOut ?? 0) +
         (dc.totalNagadOut ?? 0) +
-        (dc.totalRocketOut ?? 0) +
+        (dc.totalBkashPOut ?? dc.totalRocketOut ?? 0) +
+        (dc.totalNagadPOut ?? 0) +
         (dc.totalBankOut ?? 0) +
         (dc.totalSslOut ?? 0);
       const totalOpenBal =
         (dc.openingCash ?? 0) +
         (dc.openingBkash ?? 0) +
         (dc.openingNagad ?? 0) +
-        (dc.openingRocket ?? 0) +
+        (dc.openingBkashP ?? dc.openingRocket ?? 0) +
+        (dc.openingNagadP ?? 0) +
         (dc.openingBank ?? 0) +
         (dc.openingSsl ?? 0);
       const totalCloseBal =
         (dc.closingCash ?? 0) +
         (dc.closingBkash ?? 0) +
         (dc.closingNagad ?? 0) +
-        (dc.closingRocket ?? 0) +
+        (dc.closingBkashP ?? dc.closingRocket ?? 0) +
+        (dc.closingNagadP ?? 0) +
         (dc.closingBank ?? 0) +
         (dc.closingSsl ?? 0);
 
       const methodRows = [
         { name: 'Cash', open: dc.openingCash ?? 0, inc: dc.totalCashIn ?? 0, exp: dc.totalCashOut ?? 0, close: dc.closingCash ?? 0 },
-        { name: 'bKash', open: dc.openingBkash ?? 0, inc: dc.totalBkashIn ?? 0, exp: dc.totalBkashOut ?? 0, close: dc.closingBkash ?? 0 },
-        { name: 'Nagad', open: dc.openingNagad ?? 0, inc: dc.totalNagadIn ?? 0, exp: dc.totalNagadOut ?? 0, close: dc.closingNagad ?? 0 },
-        { name: 'Rocket', open: dc.openingRocket ?? 0, inc: dc.totalRocketIn ?? 0, exp: dc.totalRocketOut ?? 0, close: dc.closingRocket ?? 0 },
-        { name: 'Bank Transfer', open: dc.openingBank ?? 0, inc: dc.totalBankIn ?? 0, exp: dc.totalBankOut ?? 0, close: dc.closingBank ?? 0 },
+        { name: 'bKash Merchant', open: dc.openingBkash ?? 0, inc: dc.totalBkashIn ?? 0, exp: dc.totalBkashOut ?? 0, close: dc.closingBkash ?? 0 },
+        { name: 'Nagad Merchant', open: dc.openingNagad ?? 0, inc: dc.totalNagadIn ?? 0, exp: dc.totalNagadOut ?? 0, close: dc.closingNagad ?? 0 },
+        { name: 'bKash (P)', open: dc.openingBkashP ?? dc.openingRocket ?? 0, inc: dc.totalBkashPIn ?? dc.totalRocketIn ?? 0, exp: dc.totalBkashPOut ?? dc.totalRocketOut ?? 0, close: dc.closingBkashP ?? dc.closingRocket ?? 0 },
+        { name: 'Nagad (P)', open: dc.openingNagadP ?? 0, inc: dc.totalNagadPIn ?? 0, exp: dc.totalNagadPOut ?? 0, close: dc.closingNagadP ?? 0 },
+        { name: 'Bank', open: dc.openingBank ?? 0, inc: dc.totalBankIn ?? 0, exp: dc.totalBankOut ?? 0, close: dc.closingBank ?? 0 },
         { name: 'SSL Commerz', open: dc.openingSsl ?? 0, inc: dc.totalSslIn ?? 0, exp: dc.totalSslOut ?? 0, close: dc.closingSsl ?? 0 },
       ];
 
@@ -3630,7 +3772,7 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile, 
           idx + 1,
           tx.date,
           getCategoryLabel(tx),
-          (tx.paymentMethod || 'cash').toUpperCase(),
+          getPaymentMethodLabel(tx.paymentMethod, true),
           tx.type === 'income' ? 'INCOME' : 'EXPENSE',
           tx.amount ?? 0,
           tx.notes || '',
@@ -3657,10 +3799,10 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile, 
   const renderPrintPreviewModal = () => {
     if (!printPreviewData) return null;
 
-    const totalIn = (printPreviewData.totalCashIn ?? 0) + (printPreviewData.totalBkashIn ?? 0) + (printPreviewData.totalNagadIn ?? 0) + (printPreviewData.totalRocketIn ?? 0) + (printPreviewData.totalBankIn ?? 0) + (printPreviewData.totalSslIn ?? 0);
-    const totalOut = (printPreviewData.totalCashOut ?? 0) + (printPreviewData.totalBkashOut ?? 0) + (printPreviewData.totalNagadOut ?? 0) + (printPreviewData.totalRocketOut ?? 0) + (printPreviewData.totalBankOut ?? 0) + (printPreviewData.totalSslOut ?? 0);
-    const totalOpenBal = (printPreviewData.openingCash ?? 0) + (printPreviewData.openingBkash ?? 0) + (printPreviewData.openingNagad ?? 0) + (printPreviewData.openingRocket ?? 0) + (printPreviewData.openingBank ?? 0) + (printPreviewData.openingSsl ?? 0);
-    const totalCloseBal = (printPreviewData.closingCash ?? 0) + (printPreviewData.closingBkash ?? 0) + (printPreviewData.closingNagad ?? 0) + (printPreviewData.closingRocket ?? 0) + (printPreviewData.closingBank ?? 0) + (printPreviewData.closingSsl ?? 0);
+    const totalIn = (printPreviewData.totalCashIn ?? 0) + (printPreviewData.totalBkashIn ?? 0) + (printPreviewData.totalNagadIn ?? 0) + (printPreviewData.totalBkashPIn ?? printPreviewData.totalRocketIn ?? 0) + (printPreviewData.totalNagadPIn ?? 0) + (printPreviewData.totalBankIn ?? 0) + (printPreviewData.totalSslIn ?? 0);
+    const totalOut = (printPreviewData.totalCashOut ?? 0) + (printPreviewData.totalBkashOut ?? 0) + (printPreviewData.totalNagadOut ?? 0) + (printPreviewData.totalBkashPOut ?? printPreviewData.totalRocketOut ?? 0) + (printPreviewData.totalNagadPOut ?? 0) + (printPreviewData.totalBankOut ?? 0) + (printPreviewData.totalSslOut ?? 0);
+    const totalOpenBal = (printPreviewData.openingCash ?? 0) + (printPreviewData.openingBkash ?? 0) + (printPreviewData.openingNagad ?? 0) + (printPreviewData.openingBkashP ?? printPreviewData.openingRocket ?? 0) + (printPreviewData.openingNagadP ?? 0) + (printPreviewData.openingBank ?? 0) + (printPreviewData.openingSsl ?? 0);
+    const totalCloseBal = (printPreviewData.closingCash ?? 0) + (printPreviewData.closingBkash ?? 0) + (printPreviewData.closingNagad ?? 0) + (printPreviewData.closingBkashP ?? printPreviewData.closingRocket ?? 0) + (printPreviewData.closingNagadP ?? 0) + (printPreviewData.closingBank ?? 0) + (printPreviewData.closingSsl ?? 0);
 
     return (
       <div className="fixed inset-0 bg-slate-950/70 z-[120] flex items-center justify-center p-4 overflow-y-auto animate-fade-in no-print">
@@ -3751,11 +3893,12 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile, 
                   <tbody>
                     {[
                       { name: 'Cash', open: printPreviewData.openingCash ?? 0, inc: printPreviewData.totalCashIn ?? 0, exp: printPreviewData.totalCashOut ?? 0, close: printPreviewData.closingCash ?? 0 },
-                      { name: 'bKash', open: printPreviewData.openingBkash ?? 0, inc: printPreviewData.totalBkashIn ?? 0, exp: printPreviewData.totalBkashOut ?? 0, close: printPreviewData.closingBkash ?? 0 },
-                      { name: 'Nagad', open: printPreviewData.openingNagad ?? 0, inc: printPreviewData.totalNagadIn ?? 0, exp: printPreviewData.totalNagadOut ?? 0, close: printPreviewData.closingNagad ?? 0 },
-                      { name: 'Rocket', open: printPreviewData.openingRocket ?? 0, inc: printPreviewData.totalRocketIn ?? 0, exp: printPreviewData.totalRocketOut ?? 0, close: printPreviewData.closingRocket ?? 0 },
+                      { name: 'bKash Merchant', open: printPreviewData.openingBkash ?? 0, inc: printPreviewData.totalBkashIn ?? 0, exp: printPreviewData.totalBkashOut ?? 0, close: printPreviewData.closingBkash ?? 0 },
+                      { name: 'Nagad Merchant', open: printPreviewData.openingNagad ?? 0, inc: printPreviewData.totalNagadIn ?? 0, exp: printPreviewData.totalNagadOut ?? 0, close: printPreviewData.closingNagad ?? 0 },
+                      { name: 'bKash (P)', open: printPreviewData.openingBkashP ?? printPreviewData.openingRocket ?? 0, inc: printPreviewData.totalBkashPIn ?? printPreviewData.totalRocketIn ?? 0, exp: printPreviewData.totalBkashPOut ?? printPreviewData.totalRocketOut ?? 0, close: printPreviewData.closingBkashP ?? printPreviewData.closingRocket ?? 0 },
+                      { name: 'Nagad (P)', open: printPreviewData.openingNagadP ?? 0, inc: printPreviewData.totalNagadPIn ?? 0, exp: printPreviewData.totalNagadPOut ?? 0, close: printPreviewData.closingNagadP ?? 0 },
                       { name: 'Bank', open: printPreviewData.openingBank ?? 0, inc: printPreviewData.totalBankIn ?? 0, exp: printPreviewData.totalBankOut ?? 0, close: printPreviewData.closingBank ?? 0 },
-                      { name: 'SSL', open: printPreviewData.openingSsl ?? 0, inc: printPreviewData.totalSslIn ?? 0, exp: printPreviewData.totalSslOut ?? 0, close: printPreviewData.closingSsl ?? 0 },
+                      { name: 'SSL Commerz', open: printPreviewData.openingSsl ?? 0, inc: printPreviewData.totalSslIn ?? 0, exp: printPreviewData.totalSslOut ?? 0, close: printPreviewData.closingSsl ?? 0 },
                     ].map((m) => {
                       const pl = m.inc - m.exp;
                       return (
@@ -3978,7 +4121,7 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile, 
                           return (
                             <tr key={tx.id || idx} className="border-b border-slate-100">
                               <td className="py-1.5 font-semibold text-slate-700">{categoryLabel}</td>
-                              <td className="py-1.5 text-slate-600 capitalize">{tx.paymentMethod || 'cash'}</td>
+                              <td className="py-1.5 text-slate-600">{getPaymentMethodLabel(tx.paymentMethod, true)}</td>
                               <td className={`py-1.5 text-right font-bold ${tx.type === 'income' ? 'text-emerald-600' : 'text-rose-600'}`}>
                                 {tx.type === 'income' ? 'INCOME' : 'EXPENSE'}
                               </td>
@@ -4220,10 +4363,11 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile, 
                 <tbody className="divide-y divide-slate-100">
                   {[
                     { key: 'cash', label: 'Cash', open: val(openingCash), flow: cashFlow, close: closingCash },
-                    { key: 'bkash', label: 'bKash', open: val(openingBkash), flow: bkashFlow, close: closingBkash },
-                    { key: 'nagad', label: 'Nagad', open: val(openingNagad), flow: nagadFlow, close: closingNagad },
-                    { key: 'rocket', label: 'Rocket', open: val(openingRocket), flow: rocketFlow, close: closingRocket },
-                    { key: 'bank', label: 'Bank Transfer', open: val(openingBank), flow: bankFlow, close: closingBank },
+                    { key: 'bkash', label: 'bKash Merchant', open: val(openingBkash), flow: bkashFlow, close: closingBkash },
+                    { key: 'nagad', label: 'Nagad Merchant', open: val(openingNagad), flow: nagadFlow, close: closingNagad },
+                    { key: 'bkash_p', label: 'bKash (P)', open: val(openingRocket), flow: rocketFlow, close: closingRocket },
+                    { key: 'nagad_p', label: 'Nagad (P)', open: val(openingNagadP), flow: nagadPFlow, close: closingNagadP },
+                    { key: 'bank', label: 'Bank', open: val(openingBank), flow: bankFlow, close: closingBank },
                     { key: 'sslcommerz', label: 'SSL Commerz', open: val(openingSsl), flow: sslFlow, close: closingSsl },
                   ].map((row) => {
                     const rowPL = row.flow.income - row.flow.expense;
@@ -4809,8 +4953,8 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile, 
                       <td className="py-3 px-4 text-xs font-mono font-semibold text-slate-600">{tx.date}</td>
                       <td className="py-3 px-4 text-xs font-bold text-slate-700">{categoryLabel}</td>
                       <td className="py-3 px-4 text-xs text-slate-600">
-                        <span className="inline-flex items-center gap-1.5 bg-slate-100 px-2.5 py-0.5 rounded-full text-[10px] font-bold text-slate-600 capitalize">
-                          {tx.paymentMethod || 'cash'}
+                        <span className="inline-flex items-center gap-1.5 bg-slate-100 px-2.5 py-0.5 rounded-full text-[10px] font-bold text-slate-600">
+                          {getPaymentMethodLabel(tx.paymentMethod, true)}
                         </span>
                       </td>
                       <td className={`py-3 px-4 text-xs font-mono font-bold text-right ${tx.type === 'income' ? 'text-emerald-600' : 'text-rose-600'}`}>
@@ -4913,44 +5057,55 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile, 
                 <div className="text-right font-mono text-slate-800 font-bold">{(selectedClosing.closingCash ?? 0).toLocaleString()}</div>
               </div>
 
-              {/* bKash */}
+              {/* bKash Merchant */}
               <div className="grid grid-cols-5 items-center text-xs font-medium py-1.5 border-b border-slate-50">
                 <div className="col-span-2 flex items-center gap-2.5">
                   <PaymentMethodLogo method="bkash" className="w-6 h-6" />
-                  <span>bKash</span>
+                  <span>bKash Merchant</span>
                 </div>
                 <div className="text-right font-mono text-slate-600">{(selectedClosing.openingBkash ?? 0).toLocaleString()}</div>
                 <div className="text-right font-mono text-emerald-600">+{(selectedClosing.totalBkashIn ?? 0).toLocaleString()}</div>
                 <div className="text-right font-mono text-slate-800 font-bold">{(selectedClosing.closingBkash ?? 0).toLocaleString()}</div>
               </div>
 
-              {/* Nagad */}
+              {/* Nagad Merchant */}
               <div className="grid grid-cols-5 items-center text-xs font-medium py-1.5 border-b border-slate-50">
                 <div className="col-span-2 flex items-center gap-2.5">
                   <PaymentMethodLogo method="nagad" className="w-6 h-6" />
-                  <span>Nagad</span>
+                  <span>Nagad Merchant</span>
                 </div>
                 <div className="text-right font-mono text-slate-600">{(selectedClosing.openingNagad ?? 0).toLocaleString()}</div>
                 <div className="text-right font-mono text-emerald-600">+{(selectedClosing.totalNagadIn ?? 0).toLocaleString()}</div>
                 <div className="text-right font-mono text-slate-800 font-bold">{(selectedClosing.closingNagad ?? 0).toLocaleString()}</div>
               </div>
 
-              {/* Rocket */}
+              {/* bKash (P) */}
               <div className="grid grid-cols-5 items-center text-xs font-medium py-1.5 border-b border-slate-50">
                 <div className="col-span-2 flex items-center gap-2.5">
-                  <PaymentMethodLogo method="rocket" className="w-6 h-6" />
-                  <span>Rocket</span>
+                  <PaymentMethodLogo method="bkash_p" className="w-6 h-6" />
+                  <span>bKash (P)</span>
                 </div>
-                <div className="text-right font-mono text-slate-600">{(selectedClosing.openingRocket ?? 0).toLocaleString()}</div>
-                <div className="text-right font-mono text-emerald-600">+{(selectedClosing.totalRocketIn ?? 0).toLocaleString()}</div>
-                <div className="text-right font-mono text-slate-800 font-bold">{(selectedClosing.closingRocket ?? 0).toLocaleString()}</div>
+                <div className="text-right font-mono text-slate-600">{(selectedClosing.openingBkashP ?? selectedClosing.openingRocket ?? 0).toLocaleString()}</div>
+                <div className="text-right font-mono text-emerald-600">+{(selectedClosing.totalBkashPIn ?? selectedClosing.totalRocketIn ?? 0).toLocaleString()}</div>
+                <div className="text-right font-mono text-slate-800 font-bold">{(selectedClosing.closingBkashP ?? selectedClosing.closingRocket ?? 0).toLocaleString()}</div>
+              </div>
+
+              {/* Nagad (P) */}
+              <div className="grid grid-cols-5 items-center text-xs font-medium py-1.5 border-b border-slate-50">
+                <div className="col-span-2 flex items-center gap-2.5">
+                  <PaymentMethodLogo method="nagad_p" className="w-6 h-6" />
+                  <span>Nagad (P)</span>
+                </div>
+                <div className="text-right font-mono text-slate-600">{(selectedClosing.openingNagadP ?? 0).toLocaleString()}</div>
+                <div className="text-right font-mono text-emerald-600">+{(selectedClosing.totalNagadPIn ?? 0).toLocaleString()}</div>
+                <div className="text-right font-mono text-slate-800 font-bold">{(selectedClosing.closingNagadP ?? 0).toLocaleString()}</div>
               </div>
 
               {/* Bank */}
               <div className="grid grid-cols-5 items-center text-xs font-medium py-1.5 border-b border-slate-50">
                 <div className="col-span-2 flex items-center gap-2.5">
                   <PaymentMethodLogo method="bank" className="w-6 h-6" />
-                  <span>Bank Transfer</span>
+                  <span>Bank</span>
                 </div>
                 <div className="text-right font-mono text-slate-600">{(selectedClosing.openingBank ?? 0).toLocaleString()}</div>
                 <div className="text-right font-mono text-emerald-600">+{(selectedClosing.totalBankIn ?? 0).toLocaleString()}</div>
@@ -4972,19 +5127,19 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile, 
               <div className="bg-indigo-50 border border-indigo-100 rounded-xl p-4 space-y-2 mt-4 font-mono text-xs font-semibold text-slate-700">
                 <div className="flex justify-between">
                   <span>Total Opening Balance:</span>
-                  <span>{((selectedClosing.openingCash ?? 0) + (selectedClosing.openingBkash ?? 0) + (selectedClosing.openingNagad ?? 0) + (selectedClosing.openingRocket ?? 0) + (selectedClosing.openingBank ?? 0) + (selectedClosing.openingSsl ?? 0)).toLocaleString()} BDT</span>
+                  <span>{((selectedClosing.openingCash ?? 0) + (selectedClosing.openingBkash ?? 0) + (selectedClosing.openingNagad ?? 0) + (selectedClosing.openingBkashP ?? selectedClosing.openingRocket ?? 0) + (selectedClosing.openingNagadP ?? 0) + (selectedClosing.openingBank ?? 0) + (selectedClosing.openingSsl ?? 0)).toLocaleString()} BDT</span>
                 </div>
                 <div className="flex justify-between text-emerald-600">
                   <span>(+) Total Collection (Income):</span>
-                  <span>+{((selectedClosing.totalCashIn ?? 0) + (selectedClosing.totalBkashIn ?? 0) + (selectedClosing.totalNagadIn ?? 0) + (selectedClosing.totalRocketIn ?? 0) + (selectedClosing.totalBankIn ?? 0) + (selectedClosing.totalSslIn ?? 0)).toLocaleString()} BDT</span>
+                  <span>+{((selectedClosing.totalCashIn ?? 0) + (selectedClosing.totalBkashIn ?? 0) + (selectedClosing.totalNagadIn ?? 0) + (selectedClosing.totalBkashPIn ?? selectedClosing.totalRocketIn ?? 0) + (selectedClosing.totalNagadPIn ?? 0) + (selectedClosing.totalBankIn ?? 0) + (selectedClosing.totalSslIn ?? 0)).toLocaleString()} BDT</span>
                 </div>
                 <div className="flex justify-between text-rose-600">
                   <span>(-) Total Expense (Expense):</span>
-                  <span>-{((selectedClosing.totalCashOut ?? 0) + (selectedClosing.totalBkashOut ?? 0) + (selectedClosing.totalNagadOut ?? 0) + (selectedClosing.totalRocketOut ?? 0) + (selectedClosing.totalBankOut ?? 0) + (selectedClosing.totalSslOut ?? 0)).toLocaleString()} BDT</span>
+                  <span>-{((selectedClosing.totalCashOut ?? 0) + (selectedClosing.totalBkashOut ?? 0) + (selectedClosing.totalNagadOut ?? 0) + (selectedClosing.totalBkashPOut ?? selectedClosing.totalRocketOut ?? 0) + (selectedClosing.totalNagadPOut ?? 0) + (selectedClosing.totalBankOut ?? 0) + (selectedClosing.totalSslOut ?? 0)).toLocaleString()} BDT</span>
                 </div>
                 <div className="flex justify-between border-t border-indigo-100 pt-2 text-indigo-900 font-extrabold text-sm">
                   <span>(=) Grand Closing Balance:</span>
-                  <span>{((selectedClosing.closingCash ?? 0) + (selectedClosing.closingBkash ?? 0) + (selectedClosing.closingNagad ?? 0) + (selectedClosing.closingRocket ?? 0) + (selectedClosing.closingBank ?? 0) + (selectedClosing.closingSsl ?? 0)).toLocaleString()} BDT</span>
+                  <span>{((selectedClosing.closingCash ?? 0) + (selectedClosing.closingBkash ?? 0) + (selectedClosing.closingNagad ?? 0) + (selectedClosing.closingBkashP ?? selectedClosing.closingRocket ?? 0) + (selectedClosing.closingNagadP ?? 0) + (selectedClosing.closingBank ?? 0) + (selectedClosing.closingSsl ?? 0)).toLocaleString()} BDT</span>
                 </div>
               </div>
 
@@ -5179,13 +5334,14 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile, 
                 <select
                   value={editingTxPaymentMethod}
                   onChange={(e) => setEditingTxPaymentMethod(e.target.value)}
-                  className="w-full text-xs px-3 py-2 bg-white border border-slate-200 rounded-xl text-slate-700 focus:ring-1 focus:ring-indigo-500 focus:outline-none font-bold capitalize cursor-pointer"
+                  className="w-full text-xs px-3 py-2 bg-white border border-slate-200 rounded-xl text-slate-700 focus:ring-1 focus:ring-indigo-500 focus:outline-none font-bold cursor-pointer"
                 >
                   <option value="cash">Cash</option>
-                  <option value="bkash">bKash</option>
-                  <option value="nagad">Nagad</option>
-                  <option value="rocket">Rocket</option>
-                  <option value="bank">Bank Transfer</option>
+                  <option value="bkash">bKash Merchant</option>
+                  <option value="nagad">Nagad Merchant</option>
+                  <option value="bkash_p">bKash (P)</option>
+                  <option value="nagad_p">Nagad (P)</option>
+                  <option value="bank">Bank</option>
                   <option value="sslcommerz">SSL Commerz</option>
                   <option value="upay">Upay</option>
                   <option value="cellfin">Cellfin</option>
@@ -5345,10 +5501,11 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile, 
                       className="w-full text-xs px-3 py-2.5 bg-white border border-slate-200 rounded-xl text-slate-700 focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 focus:outline-none font-bold cursor-pointer"
                     >
                       <option value="cash">Cash</option>
-                      <option value="bkash">bKash</option>
-                      <option value="nagad">Nagad</option>
-                      <option value="rocket">Rocket</option>
-                      <option value="bank">Bank Transfer</option>
+                      <option value="bkash">bKash Merchant</option>
+                      <option value="nagad">Nagad Merchant</option>
+                      <option value="bkash_p">bKash (P)</option>
+                      <option value="nagad_p">Nagad (P)</option>
+                      <option value="bank">Bank</option>
                       <option value="sslcommerz">SSL Commerz</option>
                     </select>
                   </div>
@@ -5369,7 +5526,7 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile, 
 
                 <div className="p-3.5 bg-emerald-50/60 border border-emerald-100 rounded-xl flex items-center justify-between text-xs font-mono">
                   <div>
-                    <span className="text-[10px] font-bold text-slate-400 uppercase block">Opening ({entryPaymentMethod})</span>
+                    <span className="text-[10px] font-bold text-slate-400 uppercase block">Opening ({getPaymentMethodLabel(entryPaymentMethod)})</span>
                     <span className="font-bold text-slate-700">{entryPreviousBalance.toLocaleString()} BDT</span>
                   </div>
                   <div className="text-right">
@@ -5481,13 +5638,14 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile, 
                     <select
                       value={expensePaymentMethod}
                       onChange={(e) => setExpensePaymentMethod(e.target.value)}
-                      className="w-full text-xs px-3 py-2.5 bg-white border border-slate-200 rounded-xl text-slate-700 focus:ring-2 focus:ring-rose-500/20 focus:border-rose-500 focus:outline-none font-bold capitalize cursor-pointer"
+                      className="w-full text-xs px-3 py-2.5 bg-white border border-slate-200 rounded-xl text-slate-700 focus:ring-2 focus:ring-rose-500/20 focus:border-rose-500 focus:outline-none font-bold cursor-pointer"
                     >
                       <option value="cash">Cash</option>
-                      <option value="bkash">bKash</option>
-                      <option value="nagad">Nagad</option>
-                      <option value="rocket">Rocket</option>
-                      <option value="bank">Bank Transfer</option>
+                      <option value="bkash">bKash Merchant</option>
+                      <option value="nagad">Nagad Merchant</option>
+                      <option value="bkash_p">bKash (P)</option>
+                      <option value="nagad_p">Nagad (P)</option>
+                      <option value="bank">Bank</option>
                       <option value="sslcommerz">SSL Commerz</option>
                     </select>
                   </div>
@@ -5508,7 +5666,7 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile, 
 
                 <div className="p-3.5 bg-rose-50/60 border border-rose-100 rounded-xl flex items-center justify-between text-xs font-mono">
                   <div>
-                    <span className="text-[10px] font-bold text-slate-400 uppercase block">Opening ({expensePaymentMethod})</span>
+                    <span className="text-[10px] font-bold text-slate-400 uppercase block">Opening ({getPaymentMethodLabel(expensePaymentMethod)})</span>
                     <span className="font-bold text-slate-700">{getPreviousBalanceForMethod(expensePaymentMethod).toLocaleString()} BDT</span>
                   </div>
                   <div className="text-right">
@@ -5957,9 +6115,9 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile, 
                   <div className="bg-slate-50/50 rounded-2xl p-4 border border-slate-200/60 flex flex-col justify-between">
                     <div>
                       <h4 className="text-[11px] font-black text-indigo-950 uppercase tracking-wider mb-3 pb-1.5 border-b border-slate-200 flex items-center justify-between gap-2">
-                        <span>Cash Summary Details (Latest Snapshot)</span>
+                        <span>Cash Summary Details</span>
                         <span className="text-[10px] font-mono text-slate-400 shrink-0">
-                          {monthSummary.latestDrawerDoc ? monthSummary.latestDrawerDoc.date : 'No Entry'}
+                          {monthSummary.month}
                         </span>
                       </h4>
                       <div className="overflow-x-auto">
@@ -5968,7 +6126,7 @@ export function DailyClosingSection({ userId, transactions, currentUserProfile, 
                             <tr className="border-b border-slate-200 text-[9px] font-bold text-slate-500 uppercase tracking-wider">
                               <th className="py-1.5 px-1.5">Description</th>
                               <th className="py-1.5 px-1.5 text-right whitespace-nowrap">Opening Balance</th>
-                              <th className="py-1.5 px-1.5 text-right whitespace-nowrap">Today Amount</th>
+                              <th className="py-1.5 px-1.5 text-right whitespace-nowrap">Month Amount</th>
                               <th className="py-1.5 px-1.5 text-right whitespace-nowrap">Total Amount</th>
                             </tr>
                           </thead>

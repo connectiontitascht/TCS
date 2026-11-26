@@ -231,11 +231,12 @@ export function TransactionForm({ onAddTransaction }: TransactionFormProps) {
             >
               <option value="">Select Method (Optional)</option>
               <option value="Cash">💵 Cash</option>
-              <option value="bKash">📱 bKash</option>
-              <option value="Nagad">📱 Nagad</option>
-              <option value="Rocket">📱 Rocket</option>
-              <option value="Bank">🏦 Bank Transfer</option>
-              <option value="SSLCommerz">💳 SSLCommerz</option>
+              <option value="bKash Merchant">📱 bKash Merchant</option>
+              <option value="Nagad Merchant">📱 Nagad Merchant</option>
+              <option value="bKash (P)">📱 bKash (P)</option>
+              <option value="Nagad (P)">📱 Nagad (P)</option>
+              <option value="Bank">🏦 Bank</option>
+              <option value="SSL Commerz">💳 SSL Commerz</option>
             </select>
           </div>
         </div>

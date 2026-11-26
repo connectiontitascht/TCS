@@ -66,6 +66,33 @@ export const BankLogo: React.FC<LogoProps> = ({ className = "w-5 h-5 flex-shrink
   </svg>
 );
 
+export const BkashPersonalLogo: React.FC<LogoProps> = ({ className = "w-5 h-5 flex-shrink-0" }) => (
+  <svg viewBox="0 0 100 100" className={className} fill="none" xmlns="http://www.w3.org/2000/svg">
+    <rect width="100" height="100" rx="22" fill="#9D174D" />
+    <path d="M22 65 L42 35 L52 50 Z" fill="#FFFFFF" fillOpacity="0.85" />
+    <path d="M42 35 L70 30 L52 50 Z" fill="#FFFFFF" />
+    <path d="M52 50 L47 75 L42 35 Z" fill="#FFFFFF" fillOpacity="0.9" />
+    <circle cx="76" cy="76" r="18" fill="#FFFFFF" />
+    <text x="76" y="83" textAnchor="middle" fontSize="22" fontWeight="900" fill="#9D174D" fontFamily="sans-serif">P</text>
+  </svg>
+);
+
+export const NagadPersonalLogo: React.FC<LogoProps> = ({ className = "w-5 h-5 flex-shrink-0" }) => (
+  <svg viewBox="0 0 100 100" className={className} fill="none" xmlns="http://www.w3.org/2000/svg">
+    <rect width="100" height="100" rx="22" fill="url(#nagadPGrad)" />
+    <defs>
+      <linearGradient id="nagadPGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+        <stop offset="0%" stopColor="#C2410C" />
+        <stop offset="100%" stopColor="#EA580C" />
+      </linearGradient>
+    </defs>
+    <path d="M26 65 C36 35, 54 35, 64 65 C51 47, 39 47, 26 65 Z" fill="#FFFFFF" />
+    <circle cx="45" cy="36" r="9" fill="#FFFFFF" />
+    <circle cx="76" cy="76" r="18" fill="#FFFFFF" />
+    <text x="76" y="83" textAnchor="middle" fontSize="22" fontWeight="900" fill="#C2410C" fontFamily="sans-serif">P</text>
+  </svg>
+);
+
 export const UpayLogo: React.FC<LogoProps> = ({ className = "w-5 h-5 flex-shrink-0" }) => (
   <svg viewBox="0 0 100 100" className={className} fill="none" xmlns="http://www.w3.org/2000/svg">
     <rect width="100" height="100" rx="22" fill="#FFC107" />
@@ -99,14 +126,31 @@ export const PaymentMethodLogo: React.FC<PaymentMethodLogoProps> = ({ method = '
   const normMethod = method ? method.trim().toLowerCase() : 'cash';
   switch (normMethod) {
     case 'bkash':
+    case 'bkash merchant':
+    case 'bkash_merchant':
       return <BkashLogo className={className} />;
     case 'nagad':
+    case 'nagad merchant':
+    case 'nagad_merchant':
       return <NagadLogo className={className} />;
+    case 'bkash (p)':
+    case 'bkash(p)':
+    case 'bkash_p':
+    case 'bkash p':
     case 'rocket':
-      return <RocketLogo className={className} />;
+      return <BkashPersonalLogo className={className} />;
+    case 'nagad (p)':
+    case 'nagad(p)':
+    case 'nagad_p':
+    case 'nagad p':
+      return <NagadPersonalLogo className={className} />;
     case 'sslcommerz':
+    case 'ssl commerz':
+    case 'ssl':
       return <SslCommerzLogo className={className} />;
     case 'bank':
+    case 'bank transfer':
+    case 'bank_transfer':
       return <BankLogo className={className} />;
     case 'upay':
       return <UpayLogo className={className} />;

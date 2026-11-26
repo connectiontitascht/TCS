@@ -296,6 +296,12 @@
         "openingRocket": {
           "type": "number"
         },
+        "openingBkashP": {
+          "type": "number"
+        },
+        "openingNagadP": {
+          "type": "number"
+        },
         "openingBank": {
           "type": "number"
         },
@@ -312,6 +318,12 @@
           "type": "number"
         },
         "closingRocket": {
+          "type": "number"
+        },
+        "closingBkashP": {
+          "type": "number"
+        },
+        "closingNagadP": {
           "type": "number"
         },
         "closingBank": {
@@ -332,6 +344,12 @@
         "totalRocketIn": {
           "type": "number"
         },
+        "totalBkashPIn": {
+          "type": "number"
+        },
+        "totalNagadPIn": {
+          "type": "number"
+        },
         "totalBankIn": {
           "type": "number"
         },
@@ -348,6 +366,12 @@
           "type": "number"
         },
         "totalRocketOut": {
+          "type": "number"
+        },
+        "totalBkashPOut": {
+          "type": "number"
+        },
+        "totalNagadPOut": {
           "type": "number"
         },
         "totalBankOut": {

@@ -185,6 +185,8 @@ export interface DailyClosing {
   openingBkash: number;
   openingNagad: number;
   openingRocket: number;
+  openingBkashP?: number;
+  openingNagadP?: number;
   openingBank: number;
   openingSsl: number;
   
@@ -192,6 +194,8 @@ export interface DailyClosing {
   closingBkash: number;
   closingNagad: number;
   closingRocket: number;
+  closingBkashP?: number;
+  closingNagadP?: number;
   closingBank: number;
   closingSsl: number;
   
@@ -199,6 +203,8 @@ export interface DailyClosing {
   totalBkashIn: number;
   totalNagadIn: number;
   totalRocketIn: number;
+  totalBkashPIn?: number;
+  totalNagadPIn?: number;
   totalBankIn: number;
   totalSslIn: number;
   
@@ -206,6 +212,8 @@ export interface DailyClosing {
   totalBkashOut: number;
   totalNagadOut: number;
   totalRocketOut: number;
+  totalBkashPOut?: number;
+  totalNagadPOut?: number;
   totalBankOut: number;
   totalSslOut: number;
   

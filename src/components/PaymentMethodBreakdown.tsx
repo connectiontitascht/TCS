@@ -2,6 +2,7 @@ import React from 'react';
 import { Transaction } from '../types';
 import { PaymentMethodLogo } from './PaymentLogos';
 import { CreditCard, ArrowUpRight, ArrowDownRight, TrendingUp } from 'lucide-react';
+import { normalizePaymentMethodKey, PaymentMethodKey } from '../utils/paymentMethods';
 
 interface PaymentMethodBreakdownProps {
   transactions: Transaction[];
@@ -9,11 +10,19 @@ interface PaymentMethodBreakdownProps {
 
 export function PaymentMethodBreakdown({ transactions }: PaymentMethodBreakdownProps) {
   // Define known payment methods with display info
-  const paymentMethodsInfo = [
+  const paymentMethodsInfo: {
+    key: PaymentMethodKey;
+    label: string;
+    color: string;
+    bgColor: string;
+    borderColor: string;
+    progressColor: string;
+  }[] = [
     { key: 'cash', label: 'Cash', color: 'text-emerald-600', bgColor: 'bg-emerald-50', borderColor: 'border-emerald-100', progressColor: 'bg-emerald-500' },
-    { key: 'bkash', label: 'bKash', color: 'text-pink-600', bgColor: 'bg-pink-50', borderColor: 'border-pink-100', progressColor: 'bg-pink-500' },
-    { key: 'nagad', label: 'Nagad', color: 'text-orange-600', bgColor: 'bg-orange-50', borderColor: 'border-orange-100', progressColor: 'bg-orange-500' },
-    { key: 'rocket', label: 'Rocket', color: 'text-purple-600', bgColor: 'bg-purple-50', borderColor: 'border-purple-100', progressColor: 'bg-purple-500' },
+    { key: 'bkash', label: 'bKash Merchant', color: 'text-pink-600', bgColor: 'bg-pink-50', borderColor: 'border-pink-100', progressColor: 'bg-pink-500' },
+    { key: 'nagad', label: 'Nagad Merchant', color: 'text-orange-600', bgColor: 'bg-orange-50', borderColor: 'border-orange-100', progressColor: 'bg-orange-500' },
+    { key: 'bkash_p', label: 'bKash (P)', color: 'text-rose-700', bgColor: 'bg-rose-50', borderColor: 'border-rose-100', progressColor: 'bg-rose-600' },
+    { key: 'nagad_p', label: 'Nagad (P)', color: 'text-amber-700', bgColor: 'bg-amber-50', borderColor: 'border-amber-100', progressColor: 'bg-amber-600' },
     { key: 'bank', label: 'Bank', color: 'text-blue-600', bgColor: 'bg-blue-50', borderColor: 'border-blue-100', progressColor: 'bg-blue-500' },
     { key: 'sslcommerz', label: 'SSL Commerz', color: 'text-indigo-600', bgColor: 'bg-indigo-50', borderColor: 'border-indigo-100', progressColor: 'bg-indigo-500' },
   ];
@@ -22,13 +31,9 @@ export function PaymentMethodBreakdown({ transactions }: PaymentMethodBreakdownP
   const breakdownData = paymentMethodsInfo.map(method => {
     const rawMethodKey = method.key;
     
-    // Filter transactions for this method (with fallback to 'cash' for empty/undefined ones if rawKey is 'cash')
+    // Filter transactions for this method using unified normalizer
     const methodTransactions = transactions.filter(t => {
-      const pm = (t.paymentMethod || 'cash').trim().toLowerCase();
-      if (rawMethodKey === 'cash') {
-        return pm === 'cash' || !t.paymentMethod;
-      }
-      return pm === rawMethodKey;
+      return normalizePaymentMethodKey(t.paymentMethod) === rawMethodKey;
     });
 
     const income = methodTransactions

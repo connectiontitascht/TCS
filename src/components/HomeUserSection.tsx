@@ -34,6 +34,7 @@ import {
   AlertCircle,
   Lock
 } from 'lucide-react';
+import { normalizePaymentMethodKey, getPaymentMethodLabel, getPaymentMethodValue, PaymentMethodKey } from '../utils/paymentMethods';
 import { doc, setDoc, deleteDoc, serverTimestamp } from 'firebase/firestore';
 import { db, handleFirestoreError, OperationType } from '../firebase';
 import { Transaction, AppUser } from '../types';
@@ -490,7 +491,7 @@ export function HomeUserSection({ userId, onAddTransaction, transactions, curren
       doc.setFont('helvetica', 'normal');
       doc.text(`Payment Method:`, 20, 93);
       doc.setFont('helvetica', 'bold');
-      doc.text(`${bill.paymentMethod || 'Cash'}`, 65, 93);
+      doc.text(`${getPaymentMethodLabel(bill.paymentMethod)}`, 65, 93);
 
       doc.setFont('helvetica', 'normal');
       doc.text(`Collector Name:`, 20, 102);
@@ -1022,7 +1023,7 @@ export function HomeUserSection({ userId, onAddTransaction, transactions, curren
     setEditAmount(bill.amount.toString());
     setEditCollector(bill.collectorName || bill.receivedBy || '');
     setEditReceiver(bill.receiverName || 'System Admin');
-    setEditPaymentMethod(bill.paymentMethod || 'Cash');
+    setEditPaymentMethod(getPaymentMethodValue(bill.paymentMethod));
     setEditBillError('');
     setIsEditBillOpen(true);
   };
@@ -1244,8 +1245,7 @@ export function HomeUserSection({ userId, onAddTransaction, transactions, curren
 
     // Filter by on-screen payment method filter
     if (onScreenPaymentMethodFilter !== 'all') {
-      const pMethod = t.paymentMethod || 'Cash';
-      if (pMethod !== onScreenPaymentMethodFilter) return false;
+      if (normalizePaymentMethodKey(t.paymentMethod) !== normalizePaymentMethodKey(onScreenPaymentMethodFilter)) return false;
     }
 
     // 3. Filter by search query
@@ -1292,31 +1292,22 @@ export function HomeUserSection({ userId, onAddTransaction, transactions, curren
   }, [runningMonthBills]);
 
   const paymentBreakdown = React.useMemo(() => {
-    const defaultData = {
-      Cash: { approvedSum: 0, approvedCount: 0, pendingSum: 0, pendingCount: 0 },
-      bKash: { approvedSum: 0, approvedCount: 0, pendingSum: 0, pendingCount: 0 },
-      Nagad: { approvedSum: 0, approvedCount: 0, pendingSum: 0, pendingCount: 0 },
-      Bank: { approvedSum: 0, approvedCount: 0, pendingSum: 0, pendingCount: 0 },
-      Rocket: { approvedSum: 0, approvedCount: 0, pendingSum: 0, pendingCount: 0 },
-      SSLCommerz: { approvedSum: 0, approvedCount: 0, pendingSum: 0, pendingCount: 0 }
+    const defaultData: Record<PaymentMethodKey, { approvedSum: number; approvedCount: number; pendingSum: number; pendingCount: number }> = {
+      cash: { approvedSum: 0, approvedCount: 0, pendingSum: 0, pendingCount: 0 },
+      bkash: { approvedSum: 0, approvedCount: 0, pendingSum: 0, pendingCount: 0 },
+      nagad: { approvedSum: 0, approvedCount: 0, pendingSum: 0, pendingCount: 0 },
+      bkash_p: { approvedSum: 0, approvedCount: 0, pendingSum: 0, pendingCount: 0 },
+      nagad_p: { approvedSum: 0, approvedCount: 0, pendingSum: 0, pendingCount: 0 },
+      bank: { approvedSum: 0, approvedCount: 0, pendingSum: 0, pendingCount: 0 },
+      sslcommerz: { approvedSum: 0, approvedCount: 0, pendingSum: 0, pendingCount: 0 },
     };
 
     runningMonthBills.forEach((t) => {
-      const pm = (t.paymentMethod || 'Cash').trim().toLowerCase();
-      let method = 'Cash';
-      
-      if (pm === 'bkash') method = 'bKash';
-      else if (pm === 'nagad') method = 'Nagad';
-      else if (pm === 'rocket') method = 'Rocket';
-      else if (pm === 'bank') method = 'Bank';
-      else if (pm === 'sslcommerz' || pm === 'ssl') method = 'SSLCommerz';
-      else method = 'Cash';
+      const normMethod = normalizePaymentMethodKey(t.paymentMethod);
 
       // Only approved bills contribute to the approved payment method balance breakdown
       const isApproved = t.status === 'approved' || t.status === 'accountant_approved';
       const isPending = ['pending', 'pending_supervisor', 'pending_manager', 'pending_accounts'].includes(t.status || '');
-
-      const normMethod = method as 'Cash' | 'bKash' | 'Nagad' | 'Bank' | 'Rocket' | 'SSLCommerz';
 
       if (isApproved) {
         defaultData[normMethod].approvedSum += t.amount;
@@ -1371,7 +1362,7 @@ export function HomeUserSection({ userId, onAddTransaction, transactions, curren
       }
 
       if (selectedPaymentMethod !== 'all') {
-        pdfBills = pdfBills.filter(t => t.paymentMethod === selectedPaymentMethod);
+        pdfBills = pdfBills.filter(t => normalizePaymentMethodKey(t.paymentMethod) === normalizePaymentMethodKey(selectedPaymentMethod));
       }
 
       if (startDate) {
@@ -1450,7 +1441,7 @@ export function HomeUserSection({ userId, onAddTransaction, transactions, curren
           formattedMonth,
           `BDT ${bill.amount.toLocaleString('en-US')}`,
           bill.collectorName || bill.receivedBy || 'N/A',
-          bill.paymentMethod || 'Cash',
+          getPaymentMethodLabel(bill.paymentMethod),
           formattedStatus
         ];
       });
@@ -1589,55 +1580,63 @@ export function HomeUserSection({ userId, onAddTransaction, transactions, curren
           </h4>
         </div>
         
-        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-4">
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-7 gap-3.5">
           {[
             {
               key: 'Cash',
-              name: 'Cash Balance',
+              name: 'Cash',
               logo: <PaymentMethodLogo method="Cash" className="w-5 h-5" />,
               bg: 'bg-emerald-50/40 border-emerald-100 hover:bg-emerald-50/80 text-emerald-800',
               badgeColor: 'bg-emerald-100 text-emerald-800',
-              stats: paymentBreakdown.Cash
+              stats: paymentBreakdown.cash
             },
             {
-              key: 'bKash',
-              name: 'bKash Balance',
-              logo: <PaymentMethodLogo method="bKash" className="w-5 h-5" />,
+              key: 'bKash Merchant',
+              name: 'bKash Merchant',
+              logo: <PaymentMethodLogo method="bKash Merchant" className="w-5 h-5" />,
               bg: 'bg-pink-50/40 border-pink-100 hover:bg-pink-50/80 text-pink-800',
               badgeColor: 'bg-pink-100 text-pink-800',
-              stats: paymentBreakdown.bKash
+              stats: paymentBreakdown.bkash
             },
             {
-              key: 'Nagad',
-              name: 'Nagad Balance',
-              logo: <PaymentMethodLogo method="Nagad" className="w-5 h-5" />,
-              bg: 'bg-orange-50/40 border-orange-100 hover:bg-orange-50/80 text-orange-850 text-orange-850 text-orange-800',
+              key: 'Nagad Merchant',
+              name: 'Nagad Merchant',
+              logo: <PaymentMethodLogo method="Nagad Merchant" className="w-5 h-5" />,
+              bg: 'bg-orange-50/40 border-orange-100 hover:bg-orange-50/80 text-orange-800',
               badgeColor: 'bg-orange-100 text-orange-800',
-              stats: paymentBreakdown.Nagad
+              stats: paymentBreakdown.nagad
+            },
+            {
+              key: 'bKash (P)',
+              name: 'bKash (P)',
+              logo: <PaymentMethodLogo method="bKash (P)" className="w-5 h-5" />,
+              bg: 'bg-rose-50/40 border-rose-100 hover:bg-rose-50/80 text-rose-800',
+              badgeColor: 'bg-rose-100 text-rose-800',
+              stats: paymentBreakdown.bkash_p
+            },
+            {
+              key: 'Nagad (P)',
+              name: 'Nagad (P)',
+              logo: <PaymentMethodLogo method="Nagad (P)" className="w-5 h-5" />,
+              bg: 'bg-amber-50/40 border-amber-100 hover:bg-amber-50/80 text-amber-800',
+              badgeColor: 'bg-amber-100 text-amber-800',
+              stats: paymentBreakdown.nagad_p
             },
             {
               key: 'Bank',
-              name: 'Bank Balance',
+              name: 'Bank',
               logo: <PaymentMethodLogo method="Bank" className="w-5 h-5" />,
               bg: 'bg-blue-50/40 border-blue-100 hover:bg-blue-50/80 text-blue-800',
               badgeColor: 'bg-blue-100 text-blue-800',
-              stats: paymentBreakdown.Bank
+              stats: paymentBreakdown.bank
             },
             {
-              key: 'Rocket',
-              name: 'Rocket Balance',
-              logo: <PaymentMethodLogo method="Rocket" className="w-5 h-5" />,
-              bg: 'bg-purple-50/40 border-purple-100 hover:bg-purple-50/80 text-purple-800',
-              badgeColor: 'bg-purple-100 text-purple-800',
-              stats: paymentBreakdown.Rocket
-            },
-            {
-              key: 'SSLCommerz',
-              name: 'SSLCommerz Balance',
-              logo: <PaymentMethodLogo method="SSLCommerz" className="w-5 h-5" />,
+              key: 'SSL Commerz',
+              name: 'SSL Commerz',
+              logo: <PaymentMethodLogo method="SSL Commerz" className="w-5 h-5" />,
               bg: 'bg-indigo-50/40 border-indigo-100 hover:bg-indigo-50/80 text-indigo-800',
               badgeColor: 'bg-indigo-100 text-indigo-800',
-              stats: paymentBreakdown.SSLCommerz
+              stats: paymentBreakdown.sslcommerz
             }
           ].map((item) => (
             <div 
@@ -1803,11 +1802,12 @@ export function HomeUserSection({ userId, onAddTransaction, transactions, curren
                   className="w-full px-3 py-2 border border-slate-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-indigo-500 text-slate-800 font-semibold bg-white cursor-pointer"
                 >
                   <option value="Cash">💵 Cash</option>
-                  <option value="bKash">📱 bKash</option>
-                  <option value="Nagad">📱 Nagad</option>
-                  <option value="Rocket">📱 Rocket</option>
+                  <option value="bKash Merchant">📱 bKash Merchant</option>
+                  <option value="Nagad Merchant">📱 Nagad Merchant</option>
+                  <option value="bKash (P)">📱 bKash (P)</option>
+                  <option value="Nagad (P)">📱 Nagad (P)</option>
                   <option value="Bank">🏦 Bank</option>
-                  <option value="SSLCommerz">💳 SSLCommerz</option>
+                  <option value="SSL Commerz">💳 SSL Commerz</option>
                 </select>
               </div>
 
@@ -2099,11 +2099,12 @@ export function HomeUserSection({ userId, onAddTransaction, transactions, curren
                   className="w-full px-3 py-2 border border-slate-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-amber-500 text-slate-800 font-semibold bg-white cursor-pointer"
                 >
                   <option value="Cash">💵 Cash</option>
-                  <option value="bKash">📱 bKash</option>
-                  <option value="Nagad">📱 Nagad</option>
-                  <option value="Rocket">📱 Rocket</option>
+                  <option value="bKash Merchant">📱 bKash Merchant</option>
+                  <option value="Nagad Merchant">📱 Nagad Merchant</option>
+                  <option value="bKash (P)">📱 bKash (P)</option>
+                  <option value="Nagad (P)">📱 Nagad (P)</option>
                   <option value="Bank">🏦 Bank</option>
-                  <option value="SSLCommerz">💳 SSLCommerz</option>
+                  <option value="SSL Commerz">💳 SSL Commerz</option>
                 </select>
               </div>
 
@@ -2250,7 +2251,7 @@ export function HomeUserSection({ userId, onAddTransaction, transactions, curren
               <div className="flex justify-between items-center text-[11px]">
                 <span className="text-slate-500 font-medium">Collection Amount:</span>
                 <span className="font-mono font-black text-emerald-600">
-                  ৳ {approvalModal.bill.amount.toLocaleString('en-US')} ({approvalModal.bill.paymentMethod || 'Cash'})
+                  ৳ {approvalModal.bill.amount.toLocaleString('en-US')} ({getPaymentMethodLabel(approvalModal.bill.paymentMethod)})
                 </span>
               </div>
             </div>
@@ -2467,11 +2468,12 @@ export function HomeUserSection({ userId, onAddTransaction, transactions, curren
               >
                 <option value="all">All Methods</option>
                 <option value="Cash">💵 Cash</option>
-                <option value="bKash">📱 bKash</option>
-                <option value="Nagad">📱 Nagad</option>
-                <option value="Rocket">📱 Rocket</option>
+                <option value="bKash Merchant">📱 bKash Merchant</option>
+                <option value="Nagad Merchant">📱 Nagad Merchant</option>
+                <option value="bKash (P)">📱 bKash (P)</option>
+                <option value="Nagad (P)">📱 Nagad (P)</option>
                 <option value="Bank">🏦 Bank</option>
-                <option value="SSLCommerz">💳 SSLCommerz</option>
+                <option value="SSL Commerz">💳 SSL Commerz</option>
               </select>
             </div>
 
@@ -2601,7 +2603,7 @@ export function HomeUserSection({ userId, onAddTransaction, transactions, curren
                         <td className="py-3.5 px-3 whitespace-nowrap text-center">
                           <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-[10px] font-bold bg-slate-100 text-slate-600 border border-slate-200/50">
                             <PaymentMethodLogo method={bill.paymentMethod} className="w-3.5 h-3.5" />
-                            <span>{bill.paymentMethod || 'Cash'}</span>
+                            <span>{getPaymentMethodLabel(bill.paymentMethod)}</span>
                           </span>
                         </td>
 
@@ -3026,11 +3028,12 @@ export function HomeUserSection({ userId, onAddTransaction, transactions, curren
                 >
                   <option value="all">All Payment Methods</option>
                   <option value="Cash">💵 Cash</option>
-                  <option value="bKash">📱 bKash</option>
-                  <option value="Nagad">📱 Nagad</option>
-                  <option value="Rocket">📱 Rocket</option>
+                  <option value="bKash Merchant">📱 bKash Merchant</option>
+                  <option value="Nagad Merchant">📱 Nagad Merchant</option>
+                  <option value="bKash (P)">📱 bKash (P)</option>
+                  <option value="Nagad (P)">📱 Nagad (P)</option>
                   <option value="Bank">🏦 Bank</option>
-                  <option value="SSLCommerz">💳 SSLCommerz</option>
+                  <option value="SSL Commerz">💳 SSL Commerz</option>
                 </select>
               </div>
 
@@ -3041,7 +3044,7 @@ export function HomeUserSection({ userId, onAddTransaction, transactions, curren
                   listCount = listCount.filter(t => t.status === pdfStatusFilter);
                 }
                 if (pdfPaymentMethodFilter !== 'all') {
-                  listCount = listCount.filter(t => t.paymentMethod === pdfPaymentMethodFilter);
+                  listCount = listCount.filter(t => normalizePaymentMethodKey(t.paymentMethod) === normalizePaymentMethodKey(pdfPaymentMethodFilter));
                 }
                 if (pdfStartDate) {
                   listCount = listCount.filter(t => t.date >= pdfStartDate);
@@ -3206,7 +3209,7 @@ export function HomeUserSection({ userId, onAddTransaction, transactions, curren
                       </tr>
                       <tr className="hover:bg-slate-900/50">
                         <td className="p-3 text-slate-400 font-semibold">Payment Method</td>
-                        <td className="p-3 font-semibold text-white">{trackingBill.paymentMethod || 'Cash'}</td>
+                        <td className="p-3 font-semibold text-white">{getPaymentMethodLabel(trackingBill.paymentMethod)}</td>
                       </tr>
                       <tr className="hover:bg-slate-900/50">
                         <td className="p-3 text-slate-400 font-semibold">Collector</td>
